@@ -160,14 +160,37 @@ Salida en `grabacion-clips/`:
 02-el-error-de-los-20-minutos.mp4
 ```
 
-Cada clip: **1080x1920**, H.264, AAC, `faststart`, con subtítulos quemados y
-tiempos recalculados al inicio del clip.
+Cada clip: **1080x1920**, H.264, AAC, `faststart`, subtítulos quemados
+palabra por palabra, audio normalizado y tiempos recalculados al inicio del clip.
 
-Para conservar el encuadre original:
+Opciones:
 
 ```bash
-python3 clipper.py render ... --horizontal
+--horizontal              # conservar el encuadre original
+--words-per-caption 2     # palabras por bloque (default 3)
+--no-normalize            # no tocar el audio
 ```
+
+### El campo `hook`
+
+Si un clip trae `hook`, ese texto aparece **grande, en amarillo, arriba, los
+primeros 3 segundos**. Es lo que decide si alguien se queda:
+
+```json
+{ "slug": "donde-vive", "start": 12.4, "end": 31.0,
+  "hook": "NADIE TE DICE ESTO" }
+```
+
+### Aviso de duración por plataforma
+
+Al renderizar, avisa si el clip excede el límite de cada red:
+
+| Plataforma | Límite |
+|---|---|
+| X / Twitter | 140 s |
+| Instagram Reels | 90 s |
+| YouTube Shorts | 180 s |
+| TikTok | 600 s |
 
 ---
 
@@ -189,17 +212,28 @@ Llena el cuadro sin recortar cabezas y sin barras negras.
 
 ---
 
-## Estilo de subtítulos
+## Subtítulos palabra por palabra
 
-Pensado para móvil: blanco, negritas, caja semitransparente, centrado abajo.
+Whisper entrega tiempos **por palabra** (`--word_timestamps`). `clipper` los
+agrupa en bloques de 1–3 palabras que se suceden rápido — el estilo que domina
+en Reels, TikTok y Shorts, y el que mide mejor retención que el subtítulo largo.
 
-```
-FontName=DejaVu Sans, FontSize=17, Bold=1
-PrimaryColour=blanco, BackColour=negro 56%
-BorderStyle=3 (caja), Alignment=2 (abajo centro), MarginV=60
-```
+Se emiten como **ASS** (no SRT) para tener control real de tamaño, contorno y
+posición a 1080x1920. Blanco, negritas, contorno negro grueso, centrado abajo.
 
-Se ajusta en la constante `VSTYLE` dentro de `clipper.py`.
+Si la transcripción no trae palabras, cae automáticamente a subtítulo por
+segmento. Nunca falla por eso.
+
+**La fuente se detecta en tiempo de ejecución** con `fc-match`, probando Noto
+Sans, DejaVu Sans, Liberation Sans y Arial en ese orden. Codificar una fuente
+fija es un error común: si no existe en el sistema, libass sustituye por
+cualquiera y el resultado se ve mal sin avisar.
+
+## Normalización de audio
+
+Cada clip pasa por `loudnorm=I=-16:TP=-1.5:LRA=11` (EBU R128, el objetivo
+estándar de redes). Sin esto, unos clips salen susurrando y otros gritando.
+Se desactiva con `--no-normalize`.
 
 ---
 
@@ -233,27 +267,31 @@ Probado de punta a punta en Amazon Linux 2023, 2 vCPU:
 - `fetch` con URL directa → archivo bajado, duración y tamaño detectados
 - `fetch` con YouTube desde EC2 → **falla con bloqueo de bot**, y el programa
   imprime la instrucción de cookies en lugar de morir con un stacktrace
-- Video de 27.8s con voz en español → 6 segmentos transcritos, tiempos exactos
-- 1 clip renderizado: **1080x1920**, 15.4s, subtítulos quemados, 0.3 MB
+- Video con voz en español → 3 segmentos, **34 palabras con tiempo individual**
+- Fuente detectada en tiempo de ejecución: **Noto Sans** (DejaVu no existe en
+  Amazon Linux 2023 — bug real encontrado y corregido)
+- Clip renderizado: **1080x1920**, h264 + aac, subtítulos palabra por palabra,
+  gancho de 3s, audio normalizado
+- `drawtext` **no** está compilado en el ffmpeg probado; el gancho se resuelve
+  con ASS, que sí funciona vía libass
 
 ---
 
-## Mejoras posibles
+## Caché de transcripción
 
-No están implementadas. Ordenadas por relación valor/esfuerzo:
+`analyze` guarda una huella del video (tamaño + primer y último MB). Si vuelves
+a correrlo sobre el mismo archivo, reusa la transcripción en lugar de repetir
+whisper — que en CPU es la parte lenta. Con `--force` la rehace.
+
+## Mejoras pendientes
 
 | Mejora | Por qué sirve | Esfuerzo |
 |---|---|---|
-| **Subtítulo palabra por palabra** | Whisper puede dar tiempos por palabra (`--word_timestamps`). Es el estilo que domina en Reels y sube la retención. | bajo |
-| **Gancho automático en los primeros 3s** | Superponer la frase clave del clip como título grande al inicio. | bajo |
-| **Recorte por hablante activo** | Con dos personas en cuadro, seguir a quien habla en vez de centrar fijo. | alto |
-| **Verificación de duración por plataforma** | Avisar si un clip excede el límite de Reels/Shorts/TikTok. | bajo |
-| **Modo lote** | Una carpeta de grabaciones → analizar todas y dejar las transcripciones listas. | bajo |
-| **Caché de transcripción** | Reusar transcripción si el video no cambió (hash). Ahorra las corridas lentas de whisper. | medio |
 | **Corte por escena** | `ffmpeg` detecta cambios de escena; alinear los cortes ahí evita empezar a media palabra visual. | medio |
-| **Marca de agua / logo** | Overlay de marca en una esquina. | bajo |
+| **Modo lote** | Una carpeta de grabaciones → analizar todas de un tirón. | bajo |
 | **Exportar miniaturas** | Frame representativo por clip, listo para portada. | bajo |
-| **Normalización de audio** | `loudnorm` para que todos los clips suenen al mismo volumen. | bajo |
+| **Marca de agua / logo** | Overlay de marca en una esquina. | bajo |
+| **Recorte por hablante activo** | Con dos personas en cuadro, seguir a quien habla. | alto |
 
 ---
 
