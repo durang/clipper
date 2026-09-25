@@ -1,0 +1,9 @@
+# material de trabajo, nunca al repo
+*.mp4
+*.mp3
+*.wav
+*.srt
+*.transcript.json
+*.transcript.txt
+*-clips/
+__pycache__/
