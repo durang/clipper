@@ -2,8 +2,9 @@
 """
 clipper — de video largo a clips verticales con subtítulos quemados.
 
-Diseño en dos fases, a propósito:
+Diseño en fases, a propósito:
 
+  0. `fetch`    → opcional: baja el video de YouTube o cualquier sitio soportado.
   1. `analyze`  → trabajo de máquina: transcribe con marcas de tiempo.
   2. (criterio) → un humano o un agente lee la transcripción y elige los momentos.
   3. `render`   → trabajo de máquina: corta, reencuadra y quema subtítulos.
@@ -11,7 +12,7 @@ Diseño en dos fases, a propósito:
 La fase 2 NO se automatiza con heurísticas de silencio. Elegir qué momento vale
 la pena es criterio, y el criterio se delega a quien tiene contexto.
 
-Requisitos: ffmpeg (con libass), whisper.
+Requisitos: ffmpeg (con libass), whisper. Opcional: yt-dlp para `fetch`.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from pathlib import Path
 WHISPER = os.environ.get("CLIPPER_WHISPER", "whisper")
 FFMPEG = os.environ.get("CLIPPER_FFMPEG", "ffmpeg")
 FFPROBE = os.environ.get("CLIPPER_FFPROBE", "ffprobe")
+YTDLP = os.environ.get("CLIPPER_YTDLP", "yt-dlp")
 
 
 # ---------------------------------------------------------------- utilidades
@@ -70,6 +72,66 @@ def hhmmss(seconds: float) -> str:
     m, sec = divmod(rem, 60)
     ms = int(round((s - int(s)) * 1000))
     return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+
+
+# ---------------------------------------------------------------- fetch
+
+def cmd_fetch(args) -> int:
+    """Baja un video de YouTube, Reels, TikTok, X o cualquier sitio de yt-dlp."""
+    need(YTDLP)
+    outdir = Path(args.outdir).expanduser().resolve() if args.outdir else Path.cwd()
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # %(id)s en el nombre evita colisiones entre videos con el mismo título
+    tmpl = str(outdir / "%(title).80s-%(id)s.%(ext)s")
+
+    cmd = [YTDLP, "--no-playlist", "--restrict-filenames",
+           "--merge-output-format", "mp4", "-o", tmpl]
+
+    if args.cookies_from_browser:
+        cmd += ["--cookies-from-browser", args.cookies_from_browser]
+    if args.cookies:
+        cmd += ["--cookies", str(Path(args.cookies).expanduser())]
+
+    # Preferimos H.264 + AAC: es lo que ffmpeg recorta y reencoda sin sorpresas
+    cmd += ["-f", args.format or
+            "bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]/"
+            "bv*[height<=1080]+ba/b[height<=1080]/b"]
+    cmd += ["--print", "after_move:filepath", args.url]
+
+    print(f"bajando {args.url}")
+    p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    path = None
+    for line in (p.stdout or "").splitlines():
+        line = line.strip()
+        if line and Path(line).exists():
+            path = Path(line)
+
+    if p.returncode != 0 or path is None:
+        err = (p.stderr or "").strip().splitlines()
+        print("  no se pudo bajar:", file=sys.stderr)
+        for l in err[-6:]:
+            print(f"    {l}", file=sys.stderr)
+        if any("sign in" in l.lower() or "bot" in l.lower() for l in err):
+            print("\n  YouTube bloquea IPs de centro de datos. Opciones:", file=sys.stderr)
+            print("    --cookies-from-browser chrome   (desde tu máquina)", file=sys.stderr)
+            print("    --cookies cookies.txt           (exportadas del navegador)", file=sys.stderr)
+        return 1
+
+    size = path.stat().st_size / 1e6
+    dur = duration_of(path)
+    print(f"  {path.name}")
+    print(f"  {dur/60:.1f} min · {size:.1f} MB")
+
+    if args.analyze:
+        print()
+        ns = argparse.Namespace(video=str(path), model=args.model,
+                                lang=args.lang, out=None)
+        return cmd_analyze(ns)
+
+    print(f"\nsigue:  clipper.py analyze '{path.name}'")
+    return 0
 
 
 # ---------------------------------------------------------------- analyze
@@ -285,6 +347,19 @@ def main() -> int:
         description="Video largo → clips verticales con subtítulos quemados.",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    f = sub.add_parser("fetch", help="baja video de YouTube y otros sitios")
+    f.add_argument("url")
+    f.add_argument("--outdir")
+    f.add_argument("--format", help="selector de formato de yt-dlp")
+    f.add_argument("--cookies", help="archivo cookies.txt")
+    f.add_argument("--cookies-from-browser", dest="cookies_from_browser",
+                   help="chrome|firefox|safari|edge")
+    f.add_argument("--analyze", action="store_true",
+                   help="transcribir inmediatamente después de bajar")
+    f.add_argument("--model", default="base")
+    f.add_argument("--lang", default="Spanish")
+    f.set_defaults(func=cmd_fetch)
 
     a = sub.add_parser("analyze", help="transcribe con marcas de tiempo")
     a.add_argument("video")

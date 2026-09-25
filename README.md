@@ -21,16 +21,16 @@ importa.** Eso es criterio, no `ffmpeg`.
 
 ---
 
-## El diseño: dos fases y una decisión en medio
+## El diseño: tres fases mecánicas y una decisión en medio
 
 ```
-  1. analyze          2. criterio              3. render
-  ─────────           ───────────              ────────
-  video ──► whisper   transcripción ──► tú     momentos ──► ffmpeg
-            (máquina)  o un agente leen        (máquina)
-                       y eligen momentos
-                                               clips verticales
-                                               con subtítulos
+  0. fetch        1. analyze          2. criterio           3. render
+  ────────        ─────────           ───────────           ────────
+  URL ──► yt-dlp  video ──► whisper   transcripción ──► tú  momentos ──► ffmpeg
+  (opcional)      (máquina)           o un agente leen      (máquina)
+                                      y eligen momentos
+                                                            clips verticales
+                                                            con subtítulos
 ```
 
 **La fase 2 no se automatiza.** No hay detección de silencios ni "picos de
@@ -46,6 +46,7 @@ Requisitos:
 
 - `ffmpeg` compilado con **libass** (para quemar subtítulos)
 - `whisper` de OpenAI (`pip install -U openai-whisper`)
+- `yt-dlp` — opcional, solo para `fetch` (`pip install -U yt-dlp`)
 - Python 3.9+
 
 ```bash
@@ -62,6 +63,33 @@ No hay dependencias de Python más allá de la librería estándar.
 ---
 
 ## Uso
+
+### Fase 0 — bajar (opcional)
+
+Si el material está en YouTube, Reels, TikTok, X o cualquiera de los ~1800 sitios
+que soporta yt-dlp:
+
+```bash
+python3 clipper.py fetch "https://youtube.com/watch?v=..."
+
+# bajar y transcribir de un tirón
+python3 clipper.py fetch "https://..." --analyze --model base
+```
+
+Prefiere H.264 + AAC a ≤1080p, que es lo que ffmpeg recorta sin sorpresas.
+
+**YouTube desde un servidor:** YouTube bloquea IPs de centro de datos con
+*«Sign in to confirm you're not a bot»*. Verificado: falla desde EC2. Soluciones:
+
+```bash
+# desde tu propia máquina, con el navegador abierto
+python3 clipper.py fetch "https://..." --cookies-from-browser chrome
+
+# o con cookies exportadas
+python3 clipper.py fetch "https://..." --cookies cookies.txt
+```
+
+URLs directas a `.mp4` y la mayoría de los otros sitios funcionan sin cookies.
 
 ### Fase 1 — analizar
 
@@ -202,8 +230,30 @@ archivo a medias. Un clip parcial publicado es peor que ningún clip.
 
 Probado de punta a punta en Amazon Linux 2023, 2 vCPU:
 
+- `fetch` con URL directa → archivo bajado, duración y tamaño detectados
+- `fetch` con YouTube desde EC2 → **falla con bloqueo de bot**, y el programa
+  imprime la instrucción de cookies en lugar de morir con un stacktrace
 - Video de 27.8s con voz en español → 6 segmentos transcritos, tiempos exactos
 - 1 clip renderizado: **1080x1920**, 15.4s, subtítulos quemados, 0.3 MB
+
+---
+
+## Mejoras posibles
+
+No están implementadas. Ordenadas por relación valor/esfuerzo:
+
+| Mejora | Por qué sirve | Esfuerzo |
+|---|---|---|
+| **Subtítulo palabra por palabra** | Whisper puede dar tiempos por palabra (`--word_timestamps`). Es el estilo que domina en Reels y sube la retención. | bajo |
+| **Gancho automático en los primeros 3s** | Superponer la frase clave del clip como título grande al inicio. | bajo |
+| **Recorte por hablante activo** | Con dos personas en cuadro, seguir a quien habla en vez de centrar fijo. | alto |
+| **Verificación de duración por plataforma** | Avisar si un clip excede el límite de Reels/Shorts/TikTok. | bajo |
+| **Modo lote** | Una carpeta de grabaciones → analizar todas y dejar las transcripciones listas. | bajo |
+| **Caché de transcripción** | Reusar transcripción si el video no cambió (hash). Ahorra las corridas lentas de whisper. | medio |
+| **Corte por escena** | `ffmpeg` detecta cambios de escena; alinear los cortes ahí evita empezar a media palabra visual. | medio |
+| **Marca de agua / logo** | Overlay de marca en una esquina. | bajo |
+| **Exportar miniaturas** | Frame representativo por clip, listo para portada. | bajo |
+| **Normalización de audio** | `loudnorm` para que todos los clips suenen al mismo volumen. | bajo |
 
 ---
 
@@ -211,6 +261,7 @@ Probado de punta a punta en Amazon Linux 2023, 2 vCPU:
 
 - Whisper en CPU es lento. Una grabación de una hora con `base` toma un rato;
   lánzalo en segundo plano.
+- YouTube bloquea descargas desde IPs de centro de datos; requiere cookies.
 - Modelos `tiny` y `base` cometen errores con nombres propios y tecnicismos.
   Para material que se publica, revisa el `.txt` antes de renderizar.
 - El desenfoque de fondo agrega costo de CPU. Con muchos clips, considera
