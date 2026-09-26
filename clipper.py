@@ -368,9 +368,45 @@ def check_platform(dur: float) -> list[str]:
     return warns
 
 
+def watermark_chain(inlabel: str, vertical: bool, pos: str, scale: float,
+                    shadow: bool) -> str:
+    """Compone el logo sobre el video.
+
+    Un logo blanco sobre fondo claro desaparece. Por eso, si `shadow` está
+    activo, primero se pinta una copia ennegrecida y desenfocada del propio
+    logo, desplazada unos pixeles. Da contorno sin ensuciar la marca.
+    """
+    fw = 1080 if vertical else 1280
+    w = int(fw * scale)
+    m = int(fw * 0.045)          # margen proporcional al cuadro
+
+    xy = {
+        "top-right": (f"W-w-{m}", f"{m}"),
+        "top-left": (f"{m}", f"{m}"),
+        "bottom-right": (f"W-w-{m}", f"H-h-{m}"),
+        "bottom-left": (f"{m}", f"H-h-{m}"),
+    }.get(pos, (f"W-w-{m}", f"{m}"))
+    x, y = xy
+
+    if not shadow:
+        return (f";[1:v]scale={w}:-1[wm];"
+                f"[{inlabel}][wm]overlay={x}:{y}[vo]")
+
+    off = max(2, w // 90)
+    return (
+        f";[1:v]scale={w}:-1,split=2[wmf][wms];"
+        f"[wms]colorchannelmixer=rr=0:rg=0:rb=0:gr=0:gg=0:gb=0:br=0:bg=0:bb=0,"
+        f"boxblur=4:1[wsh];"
+        f"[{inlabel}][wsh]overlay={x}+{off}:{y}+{off}[wbg];"
+        f"[wbg][wmf]overlay={x}:{y}[vo]"
+    )
+
+
 def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
                 vertical: bool, idx: int, per_chunk: int,
-                normalize: bool) -> Path | None:
+                normalize: bool, watermark: Path | None = None,
+                wm_pos: str = "top-right", wm_scale: float = 0.22,
+                wm_shadow: bool = True) -> Path | None:
     start, end = float(clip["start"]), float(clip["end"])
     if end <= start:
         print(f"  clip {idx}: rango inválido, lo salto")
@@ -387,20 +423,26 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
         ass.write_text(build_ass(segs, start, end, vertical, hook, per_chunk),
                        encoding="utf-8")
 
+        tail = "vo" if not watermark else "vsub"
         if vertical:
             vf = (
                 "[0:v]split=2[bg][fg];"
                 "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
                 "crop=1080:1920,gblur=sigma=22[bgb];"
                 "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgs];"
-                f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v];[v]ass={ass.name}[vo]"
+                f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v];[v]ass={ass.name}[{tail}]"
             )
         else:
-            vf = f"[0:v]ass={ass.name}[vo]"
+            vf = f"[0:v]ass={ass.name}[{tail}]"
+
+        if watermark:
+            vf += watermark_chain(tail, vertical, wm_pos, wm_scale, wm_shadow)
 
         cmd = [FFMPEG, "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-               "-i", str(video), "-filter_complex", vf, "-map", "[vo]",
-               "-map", "0:a?"]
+               "-i", str(video)]
+        if watermark:
+            cmd += ["-i", str(watermark)]
+        cmd += ["-filter_complex", vf, "-map", "[vo]", "-map", "0:a?"]
         if normalize:
             cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
         cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "21",
@@ -450,17 +492,30 @@ def cmd_render(args) -> int:
         else video.parent / f"{video.stem}-clips"
     outdir.mkdir(parents=True, exist_ok=True)
 
+    wm = None
+    if args.watermark:
+        wm = Path(args.watermark).expanduser().resolve()
+        if not wm.exists():
+            die(f"no existe la marca de agua {wm}")
+
     has_words = any(s.get("words") for s in segs)
     print(f"renderizando {len(clips)} clip(s) de {video.name}")
     print(f"  formato: {'vertical 1080x1920' if not args.horizontal else 'original'}")
     print(f"  subtítulos: {'palabra por palabra' if has_words else 'por segmento'}"
           f" · fuente {FONT}")
-    print(f"  audio: {'normalizado EBU R128' if not args.no_normalize else 'sin tocar'}\n")
+    print(f"  audio: {'normalizado EBU R128' if not args.no_normalize else 'sin tocar'}")
+    if wm:
+        print(f"  marca de agua: {wm.name} · {args.watermark_pos} · "
+              f"{int(args.watermark_scale*100)}% del ancho"
+              f"{' con sombra' if not args.no_watermark_shadow else ''}")
+    print()
 
     made = []
     for i, c in enumerate(clips, start=1):
         r = render_clip(video, segs, c, outdir, not args.horizontal, i,
-                        args.words_per_caption, not args.no_normalize)
+                        args.words_per_caption, not args.no_normalize,
+                        wm, args.watermark_pos, args.watermark_scale,
+                        not args.no_watermark_shadow)
         if r:
             made.append(r)
 
@@ -513,6 +568,13 @@ def main() -> int:
                    help="palabras por bloque de subtítulo (default: 3)")
     r.add_argument("--no-normalize", action="store_true",
                    help="no normalizar el audio")
+    r.add_argument("--watermark", help="PNG de marca de agua (ideal con alfa)")
+    r.add_argument("--watermark-pos", default="top-right",
+                   choices=["top-right", "top-left", "bottom-right", "bottom-left"])
+    r.add_argument("--watermark-scale", type=float, default=0.22,
+                   help="ancho del logo como fracción del cuadro (default 0.22)")
+    r.add_argument("--no-watermark-shadow", action="store_true",
+                   help="sin sombra bajo el logo (logos oscuros no la necesitan)")
     r.set_defaults(func=cmd_render)
 
     args = ap.parse_args()
