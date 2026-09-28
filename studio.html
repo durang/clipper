@@ -1,0 +1,166 @@
+<!doctype html><html lang="es"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clipper Studio</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b0b0d;color:#eceff4;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+header{padding:18px 22px;border-bottom:1px solid #23252b;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+h1{font-size:19px;margin:0}
+.amber{color:#e8a33d}
+main{max-width:1000px;margin:0 auto;padding:22px}
+.card{background:#141519;border:1px solid #23252b;border-radius:12px;padding:18px;margin-bottom:16px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:#8b90a0;margin:0 0 14px}
+button{background:#e8a33d;color:#111;border:0;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer;font-size:14px}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.ghost{background:#23252b;color:#eceff4}
+input,select{background:#0e0f12;border:1px solid #2b2e36;color:#eceff4;border-radius:7px;padding:9px 11px;font:inherit;width:100%}
+label{display:block;font-size:11px;color:#8b90a0;margin:0 0 5px;text-transform:uppercase;letter-spacing:.7px}
+.row{display:grid;gap:13px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.drop{border:2px dashed #2f323b;border-radius:12px;padding:40px;text-align:center;color:#8b90a0;cursor:pointer}
+.drop.on{border-color:#e8a33d;color:#e8a33d}
+#segs{max-height:380px;overflow:auto;border:1px solid #23252b;border-radius:9px}
+.seg{display:grid;grid-template-columns:70px 1fr auto;gap:9px;padding:6px 10px;border-bottom:1px solid #1b1d22;align-items:center}
+.seg:hover{background:#17181d}
+.seg .t{color:#6d7180;font:12px ui-monospace,monospace}
+.seg input{border:0;background:transparent;padding:4px}
+.seg input:focus{background:#0e0f12;border-radius:5px}
+.mini{padding:3px 8px;font-size:11px;border-radius:5px;background:#23252b;color:#b9bec9;border:0;cursor:pointer;font-weight:600}
+.mini:hover{background:#e8a33d;color:#111}
+.clip{display:flex;gap:10px;align-items:center;background:#0e0f12;border:1px solid #2b2e36;border-radius:8px;padding:9px 12px;margin-bottom:8px}
+.clip .g{flex:1}
+.pill{display:inline-block;background:#23252b;border-radius:99px;padding:2px 10px;font-size:11px;color:#b9bec9}
+pre{background:#08090b;border:1px solid #1b1d22;border-radius:8px;padding:12px;max-height:220px;overflow:auto;font:12px ui-monospace,monospace;color:#9aa0ad;white-space:pre-wrap}
+.ok{color:#5fd68a}.err{color:#ff6b6b}.muted{color:#8b90a0;font-size:13px}
+a.dl{color:#e8a33d;text-decoration:none;font-weight:600}
+.chk{display:flex;align-items:center;gap:8px;margin:6px 0}
+.chk input{width:auto}
+.hide{display:none}
+</style>
+<header><h1>Clipper <span class="amber">Studio</span></h1><span class="muted" id="hstat"></span></header>
+<main>
+<div class="card"><h2>1 &middot; Video</h2>
+<div class="drop" id="drop">Arrastra el video aqui, o haz clic para elegirlo<br><span class="muted">mp4 &middot; mov &middot; mkv &middot; webm</span></div>
+<input type="file" id="file" class="hide" accept="video/*">
+<div id="upinfo" class="muted" style="margin-top:12px"></div></div>
+
+<div class="card hide" id="c-tr"><h2>2 &middot; Transcripcion</h2>
+<div class="row">
+<div><label>Idioma</label><select id="lang"></select></div>
+<div><label>Modelo</label><select id="model">
+<option value="tiny">tiny &mdash; rapido</option>
+<option value="base" selected>base &mdash; equilibrado</option>
+<option value="small">small &mdash; preciso, lento</option></select></div>
+<div style="display:flex;align-items:flex-end"><button id="btr">Transcribir</button></div></div>
+<div id="trstat" class="muted" style="margin-top:12px"></div></div>
+
+<div class="card hide" id="c-ed"><h2>3 &middot; Corregir subtitulos</h2>
+<div class="row" style="margin-bottom:12px">
+<div><label>Buscar</label><input id="fa" placeholder="Batagonia"></div>
+<div><label>Reemplazar por</label><input id="fb" placeholder="Patagonia"></div>
+<div style="display:flex;align-items:flex-end;gap:8px">
+<button class="ghost" id="brep">Reemplazar</button>
+<button class="ghost" id="bdic">+ Diccionario</button></div></div>
+<div id="segs"></div>
+<div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+<button id="bsave" class="ghost">Guardar correcciones</button><span class="muted" id="edstat"></span></div></div>
+
+<div class="card hide" id="c-cl"><h2>4 &middot; Momentos a cortar</h2>
+<p class="muted">En la lista de arriba usa <b>I</b> para inicio y <b>F</b> para fin, luego agrega.</p>
+<div class="row" style="margin-bottom:12px">
+<div><label>Inicio (s)</label><input id="cs" type="number" step="0.1"></div>
+<div><label>Fin (s)</label><input id="ce" type="number" step="0.1"></div>
+<div><label>Nombre</label><input id="cn" placeholder="marcas-top"></div>
+<div><label>Gancho</label><input id="ch" placeholder="LULULEMON. PATAGONIA."></div>
+<div style="display:flex;align-items:flex-end"><button id="badd">Agregar</button></div></div>
+<div id="clips"></div></div>
+
+<div class="card hide" id="c-op"><h2>5 &middot; Salida</h2>
+<div class="row">
+<div><label>Formatos</label><div id="fmts"></div></div>
+<div><label>Logo / marca de agua</label><input type="file" id="wm" accept="image/png,image/webp">
+<div style="margin-top:9px"><label>Tamano del logo</label><input id="wms" type="number" step="0.01" value="0.16"></div></div>
+<div><label>Palabras por subtitulo</label><input id="wpc" type="number" value="3">
+<div style="margin-top:9px"><label>CRF (menor = mejor)</label><input id="crf" type="number" value="19"></div></div></div>
+<div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+<button id="brender">Renderizar</button><span class="muted" id="rstat"></span></div></div>
+
+<div class="card hide" id="c-out"><h2>6 &middot; Resultados</h2><div id="outs"></div></div>
+<div class="card"><h2>Registro</h2><pre id="log">&mdash;</pre></div>
+</main>
+<script>
+var J=function(id){return "/api/job/"+id;};
+var job=null,segs=[],clips=[],edits={},timer=null;
+var LANGS={auto:"Detectar solo",Spanish:"Espanol",English:"Ingles",Portuguese:"Portugues",French:"Frances"};
+for(var k in LANGS) lang.insertAdjacentHTML("beforeend","<option value='"+k+"'>"+LANGS[k]+"</option>");
+var FM={vertical:"Vertical 1080x1920",horizontal:"Horizontal 1280x720",youtube:"YouTube 1920x1080"};
+for(var k2 in FM) fmts.insertAdjacentHTML("beforeend","<div class='chk'><input type='checkbox' id='f_"+k2+"' "+(k2=="vertical"?"checked":"")+"><label for='f_"+k2+"' style='margin:0;text-transform:none;letter-spacing:0;color:#eceff4'>"+FM[k2]+"</label></div>");
+function esc(s){return s.replace(/[.*+?^()|[\]\\]/g,"\\$&").replace(/\{/g,"\\{").replace(/\}/g,"\\}");}
+fetch("/api/health").then(function(r){return r.json();}).then(function(h){
+ hstat.textContent=h.clipper?("clipper ok - "+h.jobs+" trabajos"):"clipper NO encontrado";});
+drop.onclick=function(){file.click();};
+drop.ondragover=function(e){e.preventDefault();drop.classList.add("on");};
+drop.ondragleave=function(){drop.classList.remove("on");};
+drop.ondrop=function(e){e.preventDefault();drop.classList.remove("on");up(e.dataTransfer.files[0]);};
+file.onchange=function(e){up(e.target.files[0]);};
+function up(f){if(!f)return;
+ upinfo.textContent="subiendo "+f.name+" ("+(f.size/1048576).toFixed(1)+" MB)...";
+ fetch("/api/upload",{method:"POST",headers:{"X-Filename":encodeURIComponent(f.name)},body:f})
+ .then(function(r){return r.json();}).then(function(j){job=j;
+  upinfo.innerHTML="<span class='ok'>OK "+job.video+" - "+job.mb+" MB</span>";
+  document.getElementById("c-tr").classList.remove("hide");poll();});}
+btr.onclick=function(){btr.disabled=true;trstat.textContent="transcribiendo, esto tarda...";
+ fetch(J(job.id)+"/analyze",{method:"POST",headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({lang:lang.value,model:model.value})}).then(poll);};
+function poll(){clearInterval(timer);timer=setInterval(function(){
+ fetch(J(job.id)).then(function(r){return r.json();}).then(function(j){job=j;
+  log.textContent=(job.log||[]).slice(-40).join("\n")||"-";log.scrollTop=log.scrollHeight;
+  if(job.status=="transcrito"&&!segs.length){btr.disabled=false;
+   trstat.innerHTML="<span class='ok'>OK transcrito - idioma "+(job.lang||"?")+"</span>";loadSegs();}
+  if(job.status=="listo"){clearInterval(timer);brender.disabled=false;showOut();}
+  if(job.status=="error"){clearInterval(timer);btr.disabled=false;brender.disabled=false;
+   rstat.innerHTML="<span class='err'>fallo - revisa el registro</span>";}});},1500);}
+function loadSegs(){fetch(J(job.id)+"/transcript").then(function(r){return r.json();}).then(function(d){
+ segs=d.segments||[];draw();["c-ed","c-cl","c-op"].forEach(function(i){
+  document.getElementById(i).classList.remove("hide");});});}
+function draw(){document.getElementById("segs").innerHTML=segs.map(function(s,i){
+ return "<div class='seg'><span class='t'>"+s.start.toFixed(1)+"</span><input data-i='"+i+"' value=\""+(s.text||"").replace(/"/g,"&quot;").trim()+"\"><span><button class='mini' onclick='cs.value="+s.start.toFixed(1)+"'>I</button> <button class='mini' onclick='ce.value="+s.end.toFixed(1)+"'>F</button></span></div>";}).join("");
+ document.querySelectorAll(".seg input").forEach(function(el){el.oninput=function(e){
+  edits[e.target.dataset.i]=e.target.value;edstat.textContent=Object.keys(edits).length+" sin guardar";};});}
+brep.onclick=function(){if(!fa.value)return;var n=0;
+ segs.forEach(function(s,i){var t=(edits[i]!==undefined?edits[i]:s.text);
+  if(t.toLowerCase().indexOf(fa.value.toLowerCase())>=0){
+   edits[i]=t.replace(new RegExp(esc(fa.value),"gi"),fb.value);n++;}});
+ segs.forEach(function(s,i){if(edits[i]!==undefined)s.text=edits[i];});draw();
+ edstat.textContent=n+" reemplazos, sin guardar";};
+bdic.onclick=function(){if(!fa.value||!fb.value)return;var o={};o[fa.value]=fb.value;
+ fetch("/api/dictionary",{method:"POST",headers:{"Content-Type":"application/json"},
+  body:JSON.stringify(o)}).then(function(){
+   edstat.innerHTML="<span class='ok'>guardado en diccionario permanente</span>";});};
+bsave.onclick=function(){fetch(J(job.id)+"/transcript",{method:"POST",
+ headers:{"Content-Type":"application/json"},body:JSON.stringify({edits:edits})}).then(function(){
+  edits={};edstat.innerHTML="<span class='ok'>OK guardado</span>";});};
+badd.onclick=function(){var s=parseFloat(cs.value),e=parseFloat(ce.value);
+ if(isNaN(s)||isNaN(e)||e<=s){alert("Revisa inicio y fin");return;}
+ clips.push({slug:cn.value||("clip-"+(clips.length+1)),start:s,end:e,hook:ch.value||""});
+ cn.value="";ch.value="";dc();};
+function dc(){document.getElementById("clips").innerHTML=clips.map(function(c,i){
+ return "<div class='clip'><span class='pill'>"+(c.end-c.start).toFixed(1)+"s</span><div class='g'><b>"+c.slug+"</b><br><span class='muted'>"+(c.hook||"sin gancho")+"</span></div><button class='mini' onclick='clips.splice("+i+",1);dc()'>quitar</button></div>";}).join("")||"<span class='muted'>Aun no hay momentos.</span>";}
+dc();
+wm.onchange=function(e){var f=e.target.files[0];if(!f)return;
+ fetch(J(job.id)+"/watermark",{method:"POST",headers:{"X-Filename":encodeURIComponent(f.name)},
+  body:f}).then(function(){rstat.innerHTML="<span class='ok'>logo cargado</span>";});};
+brender.onclick=function(){var fs=Object.keys(FM).filter(function(k){
+  return document.getElementById("f_"+k).checked;});
+ if(!clips.length){alert("Agrega al menos un momento");return;}
+ if(!fs.length){alert("Elige al menos un formato");return;}
+ brender.disabled=true;rstat.textContent="renderizando...";
+ fetch(J(job.id)+"/render",{method:"POST",headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({clips:clips,formats:fs,watermark_scale:parseFloat(wms.value),
+   wpc:parseInt(wpc.value),crf:parseInt(crf.value)})}).then(poll);};
+function showOut(){document.getElementById("c-out").classList.remove("hide");
+ rstat.innerHTML="<span class='ok'>OK listo</span>";
+ var h=(job.outputs||[]).map(function(o){
+  return "<div class='clip'><span class='pill'>"+o.fmt+"</span><div class='g'>"+o.name+" <span class='muted'>- "+o.mb+" MB</span></div><a class='dl' href='"+J(job.id)+"/file?p="+encodeURIComponent(o.rel)+"'>descargar</a></div>";}).join("");
+ if(job.zip)h+="<div style='margin-top:12px'><a class='dl' href='"+J(job.id)+"/file?p="+encodeURIComponent(job.zip)+"'>descargar todo ("+job.zip+")</a></div>";
+ document.getElementById("outs").innerHTML=h;}
+</script></html>

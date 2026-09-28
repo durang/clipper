@@ -311,3 +311,27 @@ whisper — que en CPU es la parte lenta. Con `--force` la rehace.
 ## Licencia
 
 MIT
+
+## Clipper Studio (interfaz web)
+
+Interfaz de navegador para el flujo completo, sin tocar la terminal.
+
+    python3 studio.py          # escucha en 127.0.0.1:8791
+
+Variables: STUDIO_PORT, STUDIO_DIR, CLIPPER, WHISPER_BIN, STUDIO_MAX_BYTES.
+
+Pasos en pantalla:
+
+1. Subir video (arrastrar y soltar, hasta 4 GB)
+2. Transcribir — idioma manual o **deteccion automatica** (recorta 30 s y usa el
+   modelo tiny antes de la transcripcion completa)
+3. Corregir subtitulos — edicion por segmento, buscar-y-reemplazar y
+   **diccionario permanente** que se aplica solo en todos los videos futuros
+4. Marcar momentos — botones I/F sobre cada linea de la transcripcion
+5. Salida — vertical / horizontal / YouTube a la vez, logo, escala de marca de
+   agua, palabras por subtitulo y CRF
+6. Descargar cada clip o el ZIP completo
+
+Solo libreria estandar de Python. Escucha unicamente en loopback; la exposicion
+se hace por Tailscale serve. Toda ruta de descarga se valida contra el
+directorio del trabajo.
