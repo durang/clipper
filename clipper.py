@@ -323,11 +323,15 @@ def chunk_words(words: list[dict], start: float, end: float,
 
 
 def build_ass(segs: list[dict], start: float, end: float, vertical: bool,
-              hook: str | None, per_chunk: int) -> str:
-    cap_size = 96 if vertical else 54
-    hook_size = 76 if vertical else 44
+              hook: str | None, per_chunk: int, cap_scale: float = 1.0,
+              out_h: int = 0) -> str:
+    # El tamano base se define contra 720p horizontal / 1920 vertical.
+    # Si el lienzo crece, la letra crece en proporcion para verse igual.
+    prop = (out_h / 720.0) if (out_h and not vertical) else 1.0
+    cap_size = int((96 if vertical else 54) * cap_scale * prop)
+    hook_size = int((76 if vertical else 44) * cap_scale * prop)
     body = ASS_HEADER.format(font=FONT, cap_size=cap_size, hook_size=hook_size,
-                             cap_margin=260 if vertical else 90)
+                             cap_margin=260 if vertical else int(90 * prop))
     events = []
 
     all_words = []
@@ -369,14 +373,14 @@ def check_platform(dur: float) -> list[str]:
 
 
 def watermark_chain(inlabel: str, vertical: bool, pos: str, scale: float,
-                    shadow: bool) -> str:
+                    shadow: bool, frame_w: int = 0) -> str:
     """Compone el logo sobre el video.
 
     Un logo blanco sobre fondo claro desaparece. Por eso, si `shadow` está
     activo, primero se pinta una copia ennegrecida y desenfocada del propio
     logo, desplazada unos pixeles. Da contorno sin ensuciar la marca.
     """
-    fw = 1080 if vertical else 1280
+    fw = frame_w or (1080 if vertical else 1280)
     w = int(fw * scale)
     m = int(fw * 0.045)          # margen proporcional al cuadro
 
@@ -406,7 +410,9 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
                 vertical: bool, idx: int, per_chunk: int,
                 normalize: bool, watermark: Path | None = None,
                 wm_pos: str = "top-right", wm_scale: float = 0.22,
-                wm_shadow: bool = True) -> Path | None:
+                wm_shadow: bool = True, cap_scale: float = 1.0,
+                crf: int = 21, preset: str = "medium",
+                out_h: int = 0) -> Path | None:
     start, end = float(clip["start"]), float(clip["end"])
     if end <= start:
         print(f"  clip {idx}: rango inválido, lo salto")
@@ -420,8 +426,8 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
     with tempfile.TemporaryDirectory(prefix="clipper-r-") as td:
         td = Path(td)
         ass = td / "s.ass"
-        ass.write_text(build_ass(segs, start, end, vertical, hook, per_chunk),
-                       encoding="utf-8")
+        ass.write_text(build_ass(segs, start, end, vertical, hook, per_chunk,
+                                 cap_scale, out_h), encoding="utf-8")
 
         tail = "vo" if not watermark else "vsub"
         if vertical:
@@ -433,10 +439,16 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
                 f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v];[v]ass={ass.name}[{tail}]"
             )
         else:
-            vf = f"[0:v]ass={ass.name}[{tail}]"
+            if out_h:
+                ow = int(out_h * 16 / 9) // 2 * 2
+                vf = (f"[0:v]scale={ow}:{out_h}:flags=lanczos[vs0];"
+                      f"[vs0]ass={ass.name}[{tail}]")
+            else:
+                vf = f"[0:v]ass={ass.name}[{tail}]"
 
         if watermark:
-            vf += watermark_chain(tail, vertical, wm_pos, wm_scale, wm_shadow)
+            fw = 0 if vertical or not out_h else int(out_h * 16 / 9) // 2 * 2
+            vf += watermark_chain(tail, vertical, wm_pos, wm_scale, wm_shadow, fw)
 
         cmd = [FFMPEG, "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                "-i", str(video)]
@@ -445,8 +457,8 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
         cmd += ["-filter_complex", vf, "-map", "[vo]", "-map", "0:a?"]
         if normalize:
             cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
-        cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "21",
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart", str(out)]
 
         rc = subprocess.run(cmd, cwd=td, stdout=subprocess.DEVNULL,
@@ -502,8 +514,9 @@ def cmd_render(args) -> int:
     print(f"renderizando {len(clips)} clip(s) de {video.name}")
     print(f"  formato: {'vertical 1080x1920' if not args.horizontal else 'original'}")
     print(f"  subtítulos: {'palabra por palabra' if has_words else 'por segmento'}"
-          f" · fuente {FONT}")
-    print(f"  audio: {'normalizado EBU R128' if not args.no_normalize else 'sin tocar'}")
+          f" · fuente {FONT} · escala {args.caption_scale}x")
+    print(f"  audio: {'normalizado EBU R128' if not args.no_normalize else 'sin tocar'} · 192k")
+    print(f"  calidad: CRF {args.crf} · preset {args.preset}")
     if wm:
         print(f"  marca de agua: {wm.name} · {args.watermark_pos} · "
               f"{int(args.watermark_scale*100)}% del ancho"
@@ -515,7 +528,8 @@ def cmd_render(args) -> int:
         r = render_clip(video, segs, c, outdir, not args.horizontal, i,
                         args.words_per_caption, not args.no_normalize,
                         wm, args.watermark_pos, args.watermark_scale,
-                        not args.no_watermark_shadow)
+                        not args.no_watermark_shadow, args.caption_scale,
+                        args.crf, args.preset, args.out_height)
         if r:
             made.append(r)
 
@@ -573,6 +587,14 @@ def main() -> int:
                    choices=["top-right", "top-left", "bottom-right", "bottom-left"])
     r.add_argument("--watermark-scale", type=float, default=0.22,
                    help="ancho del logo como fracción del cuadro (default 0.22)")
+    r.add_argument("--out-height", type=int, default=0,
+                   help="alto de salida en modo horizontal (1080 escala 720p a FHD)")
+    r.add_argument("--crf", type=int, default=21,
+                   help="calidad x264: 18 casi sin perdida, 23 estandar")
+    r.add_argument("--preset", default="medium",
+                   help="veryfast|fast|medium|slow — mas lento = mejor compresion")
+    r.add_argument("--caption-scale", type=float, default=1.0,
+                   help="multiplicador del tamano de subtitulo (1.4 = 40%% mas grande)")
     r.add_argument("--no-watermark-shadow", action="store_true",
                    help="sin sombra bajo el logo (logos oscuros no la necesitan)")
     r.set_defaults(func=cmd_render)
