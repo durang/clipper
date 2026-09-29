@@ -598,7 +598,7 @@ def build_ass(segs: list[dict], start: float, end: float, vertical: bool,
                           f"{ass_escape(s['text'])}")
 
     if hook:
-        h = ass_escape(hook)
+        h = ass_escape(hook.replace("|", " ")).replace("  ", " ")   # "serif|DISPLAY" es para el nivel 2
         events.insert(0, f"Dialogue: 1,{ass_time(0)},{ass_time(3.0)},Hook,,0,0,0,,{h}")
 
     return body + "\n".join(events) + "\n"
