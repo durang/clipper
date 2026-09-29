@@ -9,10 +9,10 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 PORT = int(os.environ.get("STUDIO_PORT", "8791"))
 HOST = os.environ.get("STUDIO_HOST", "127.0.0.1")
-ROOT = Path(os.environ.get("STUDIO_DIR", "/home/ec2-user/clipper-studio"))
-CLIPPER = Path(os.environ.get("CLIPPER", "/tmp/clipper/clipper.py"))
+ROOT = Path(os.environ.get("STUDIO_DIR", str(Path.home() / "clipper-studio")))
+CLIPPER = Path(os.environ.get("CLIPPER", str(Path(__file__).with_name("clipper.py"))))
 PYTHON = os.environ.get("STUDIO_PYTHON", "python3")
-WHISPER = Path(os.environ.get("WHISPER_BIN", "/home/ec2-user/.local/bin/whisper"))
+WHISPER = Path(os.environ.get("WHISPER_BIN", str(Path.home() / ".local/bin/whisper")))
 MAX_BYTES = int(os.environ.get("STUDIO_MAX_BYTES", str(4 * 1024**3)))
 JOBS = ROOT / "jobs"; DICT_FILE = ROOT / "dictionary.json"
 JOBS.mkdir(parents=True, exist_ok=True)
