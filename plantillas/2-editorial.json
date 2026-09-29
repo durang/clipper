@@ -1,0 +1,13 @@
+{
+  "nombre": "Editorial",
+  "nivel": 2,
+  "descripcion": "Tipografía de estudio (Inter Tight, Instrument Serif, JetBrains Mono), paleta papel/tinta/amarillo, palabra activa sobre caja de color, rótulo superior, barra de progreso, gancho en dos líneas y un grade suave.",
+  "colores": { "tinta": "#111111", "papel": "#F3EEE6", "acento": "#FFD23F", "texto": "#FFFFFF" },
+  "subtitulo": { "tamano": 70, "palabras": 3, "activa": "caja", "linea_base": 1400 },
+  "gancho": { "serif": 96, "display": 150, "duracion": 3.2 },
+  "rotulo": { "izquierda": "", "derecha": "" },
+  "barra_progreso": true,
+  "degradados": true,
+  "grade": "eq=contrast=1.04:saturation=0.92:brightness=0.01,colorbalance=rs=0.02:bs=-0.02",
+  "margen": 64
+}

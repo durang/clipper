@@ -604,6 +604,296 @@ def build_ass(segs: list[dict], start: float, end: float, vertical: bool,
     return body + "\n".join(events) + "\n"
 
 
+# ---------------------------------------------------------------- plantillas (niveles)
+#
+# Nivel 1 · Clásico    → build_ass() de arriba. Rápido, seguro.
+# Nivel 2 · Editorial  → build_ass_editorial(): tipografía de estudio, paleta, caja en la palabra
+#                        activa, rótulo, barra de progreso, gancho en dos líneas, grade suave.
+# Nivel 3 · Estudio    → no se quema nada: corte limpio + propuesta para /edit-video (ver cmd_render).
+
+HERE = Path(__file__).resolve().parent
+FONTS_DIR = HERE / "fonts"
+PLANTILLAS_DIR = HERE / "plantillas"
+_METRICS = None
+
+
+def metrics() -> dict:
+    global _METRICS
+    if _METRICS is None:
+        try:
+            _METRICS = json.loads((FONTS_DIR / "metrics.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _METRICS = {}
+    return _METRICS
+
+
+def text_w(text: str, fam: str, size: float, spacing: float = 0.0) -> float:
+    """Ancho en píxeles tal como lo pinta libass (em = tamaño / (winAscent + winDescent))."""
+    m = metrics().get(fam)
+    if not m:
+        return len(text) * size * 0.42
+    em = size / m["win"]
+    return sum(m["adv"].get(c, m["avg"]) for c in text) * em + spacing * max(len(text) - 1, 0)
+
+
+def cell_top(fam: str, size: float, baseline: float) -> float:
+    """y de \\pos con \\an7 para que la línea base caiga en `baseline`."""
+    m = metrics().get(fam, {"win": 1.2, "winAscent": 0.95})
+    return baseline - m["winAscent"] * size / m["win"]
+
+
+def cap_h(fam: str, size: float) -> float:
+    m = metrics().get(fam, {"win": 1.2, "cap": 0.72})
+    return m["cap"] * size / m["win"]
+
+
+def ass_color(hex_rgb: str, alpha: int = 0) -> str:
+    h = hex_rgb.lstrip("#")
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H{alpha:02X}{b}{g}{r}".upper()
+
+
+def _merge(a: dict, b: dict) -> dict:
+    out = dict(a)
+    for k, v in (b or {}).items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load_plantilla(nivel: int, path: str | None, cliente: str | None) -> dict:
+    """Plantilla del nivel → encima la del cliente (clients/<slug>/clipper.json) → encima --plantilla."""
+    base = {}
+    for f in sorted(PLANTILLAS_DIR.glob(f"{nivel}-*.json")):
+        base = json.loads(f.read_text(encoding="utf-8"))
+        break
+    if cliente:
+        area = os.environ.get("EDIT_VIDEO_CLIENTS") or _config_value("EDIT_VIDEO_CLIENTS") \
+            or str(Path.home() / ".agents/edit-video-clients")
+        cf = Path(area) / "clients" / cliente / "clipper.json"
+        if cf.exists():
+            extra = json.loads(cf.read_text(encoding="utf-8"))
+            if extra.get("logo"):
+                extra["logo"] = str((cf.parent / extra["logo"]).resolve())
+            base = _merge(base, extra)
+    if path:
+        base = _merge(base, json.loads(Path(path).expanduser().read_text(encoding="utf-8")))
+    base.setdefault("nivel", nivel)
+    return base
+
+
+def _rect(w: float, h: float) -> str:
+    w, h = round(w), round(h)
+    return f"m 0 0 l {w} 0 l {w} {h} l 0 {h}"
+
+
+def build_ass_editorial(segs: list[dict], start: float, end: float, W: int, H: int,
+                        clip: dict, P: dict, per_chunk: int, captions: bool,
+                        remap=None, dur: float | None = None) -> str:
+    """Nivel 2. Todo posicionado a mano con las métricas reales de las fuentes."""
+    vertical = H > W
+    k = (H / 1920) if vertical else (H / 1080)       # escala respecto al diseño base
+    M = P.get("margen", 64) * (W / 1080 if vertical else W / 1920)
+    C = P.get("colores", {})
+    ink, acc, txt = C.get("tinta", "#111111"), C.get("acento", "#FFD23F"), C.get("texto", "#FFFFFF")
+    T = remap or (lambda t: t - start)
+    dur = dur if dur is not None else end - start
+    D, S, X, MO = "Clipper Display", "Clipper Serif", "Clipper Text", "Clipper Mono"
+
+    ev = []
+    def add(layer, a, b, style, body):
+        if b - a > 0.01:
+            ev.append(f"Dialogue: {layer},{ass_time(a)},{ass_time(b)},{style},,0,0,0,,{body}")
+
+    # Degradados de legibilidad (bandas de tinta con alfa creciente)
+    if P.get("degradados", True):
+        # Muchas bandas finas con curva suave (ease) y sin solaparse: sin escalones visibles.
+        n = 48
+        top_h, bot_y = (640 if vertical else 330) * k, (1150 if vertical else 700) * k
+        ease = lambda u: u * u * (3 - 2 * u)
+        for i in range(n):
+            u = (i + 0.5) / n
+            a_top = int(0x50 + (0xFF - 0x50) * ease(u))
+            y0, y1 = round(top_h * i / n), round(top_h * (i + 1) / n)
+            add(0, 0, dur, "Fx", f"{{\\an7\\pos(0,{y0})\\1c{ass_color(ink)}\\1a&H{a_top:02X}&\\p1}}{_rect(W, y1 - y0)}")
+            a_bot = int(0xFF - (0xFF - 0x40) * ease(u))
+            y0, y1 = round(bot_y + (H - bot_y) * i / n), round(bot_y + (H - bot_y) * (i + 1) / n)
+            add(0, 0, dur, "Fx", f"{{\\an7\\pos(0,{y0})\\1c{ass_color(ink)}\\1a&H{a_bot:02X}&\\p1}}{_rect(W, y1 - y0)}")
+
+    # Rótulo superior: raya de acento + texto mono; a la derecha, marca o fuente
+    rot = P.get("rotulo", {})
+    kick = (clip.get("kicker") or rot.get("izquierda") or "").upper()
+    right = (clip.get("fuente") or rot.get("derecha") or "")
+    ks = 30 * k
+    kb = (200 if vertical else 92) * k
+    if kick:
+        add(3, 0, dur, "Fx", f"{{\\an7\\pos({M:.0f},{kb - cap_h(MO, ks) / 2 - 2 * k:.0f})\\1c{ass_color(acc)}\\p1}}{_rect(28 * k, 4 * k)}")
+        add(3, 0, dur, "Fx", f"{{\\an7\\pos({M + 44 * k:.0f},{cell_top(MO, ks, kb):.0f})\\fn{MO}\\fs{ks:.0f}\\fsp{3 * k:.1f}\\1c{ass_color(txt)}\\bord{4 * k:.1f}\\3c{ass_color(ink)}\\3a&H90&\\blur{8 * k:.1f}\\shad0}}{ass_escape(kick)}")
+    if right and not P.get("_logo"):
+        rw = text_w(right, MO, ks * 0.92, 1.5 * k)
+        add(3, 0, dur, "Fx", f"{{\\an7\\pos({W - M - rw:.0f},{cell_top(MO, ks * 0.92, kb):.0f})\\fn{MO}\\fs{ks * 0.92:.0f}\\fsp{1.5 * k:.1f}\\1c{ass_color(txt)}\\1a&H30&\\bord0\\shad0}}{ass_escape(right)}")
+
+    # Barra de progreso (dentro de la zona segura)
+    if P.get("barra_progreso", True):
+        by, bw, bh = (1512 if vertical else 1040) * k, W - 2 * M, 4 * k
+        add(1, 0, dur, "Fx", f"{{\\an7\\pos({M:.0f},{by:.0f})\\1c{ass_color(txt)}\\1a&HB0&\\p1}}{_rect(bw, bh)}")
+        add(2, 0, dur, "Fx", f"{{\\an7\\pos({M:.0f},{by:.0f})\\1c{ass_color(acc)}\\fscx0\\t(0,{int(dur * 1000)},\\fscx100)\\p1}}{_rect(bw, bh)}")
+
+    # Gancho: "serif|DISPLAY" — dos líneas arriba a la izquierda, entra subiendo
+    hook = clip.get("hook")
+    if hook:
+        g = P.get("gancho", {})
+        hd = float(g.get("duracion", 3.2))
+        serif_t, disp_t = (hook.split("|", 1) + [""])[:2] if "|" in hook else ("", hook)
+        disp_t = disp_t.strip().upper()
+        ss, ds = g.get("serif", 96) * k, g.get("display", 150) * k
+        while ds > 40 and text_w(disp_t, D, ds) > W - 2 * M:
+            ds -= 4
+        y = (300 if vertical else 170) * k
+        fade = "\\fad(200,250)"
+        if serif_t.strip():
+            b1 = y + cap_h(S, ss)
+            t1 = cell_top(S, ss, b1)
+            add(4, 0, hd, "Fx", f"{{\\an7\\move({M:.0f},{t1 + 24 * k:.0f},{M:.0f},{t1:.0f},0,380){fade}\\fn{S}\\fs{ss:.0f}\\1c{ass_color(txt)}\\bord{4 * k:.1f}\\3c{ass_color(ink)}\\3a&H90&\\blur{8 * k:.1f}\\shad0}}{ass_escape(serif_t.strip())}")
+            y = b1 + 22 * k
+        b2 = y + cap_h(D, ds)
+        t2 = cell_top(D, ds, b2)
+        add(4, 0.08, hd, "Fx", f"{{\\an7\\move({M:.0f},{t2 + 28 * k:.0f},{M:.0f},{t2:.0f},0,420){fade}\\fn{D}\\fs{ds:.0f}\\1c{ass_color(txt)}\\bord{4 * k:.1f}\\3c{ass_color(ink)}\\3a&H90&\\blur{8 * k:.1f}\\shad0}}{ass_escape(disp_t)}")
+        uw = max(text_w(disp_t, D, ds) * 0.45, 120 * k)
+        add(4, 0.35, hd, "Fx", f"{{\\an7\\pos({M:.0f},{b2 + 18 * k:.0f})\\1c{ass_color(acc)}\\fscx0\\t(0,350,\\fscx100){fade}\\p1}}{_rect(uw, 12 * k)}")
+
+    # Subtítulos: bloque centrado, palabra activa sobre caja de acento con tinta
+    all_words = [w for s in segs for w in (s.get("words") or [])]
+    if captions and all_words:
+        st = P.get("subtitulo", {})
+        fs = st.get("tamano", 70) * k
+        # vertical: por encima del 20 % inferior (Reels/TikTok); horizontal: 86 % del alto
+        base = st.get("linea_base", 1400) * k if vertical else H * 0.86
+        box_on = st.get("activa", "caja") == "caja"
+        maxw = W - 2 * M - 24 * k
+        sp = text_w(" ", D, fs)
+        per = int(st.get("palabras", per_chunk))
+        # bloques: por palabras y por ancho real
+        blocks, cur = [], []
+        for w in [w for w in all_words if w["end"] > start and w["start"] < end]:
+            test = cur + [w]
+            if cur and (len(cur) >= per or text_w(" ".join(x["w"] for x in test), D, fs) > maxw):
+                blocks.append(cur); cur = []
+            cur.append(w)
+        if cur:
+            blocks.append(cur)
+        top = cell_top(D, fs, base)
+        ch = cap_h(D, fs)
+        for grp in blocks:
+            a = T(max(grp[0]["start"], start))
+            b = T(min(grp[-1]["end"], end))
+            if b - a < 0.08:
+                b = a + 0.08
+            widths = [text_w(w["w"], D, fs) for w in grp]
+            total = sum(widths) + sp * (len(grp) - 1)
+            x0 = W / 2 - total / 2
+            xs, x = [], x0
+            for wd in widths:
+                xs.append(x); x += wd + sp
+            for j, w in enumerate(grp):
+                wa = a if j == 0 else T(w["start"])
+                wb = b if j == len(grp) - 1 else T(grp[j + 1]["start"])
+                if wb - wa < 0.02:
+                    continue
+                fin = "\\fad(90,0)" if j == 0 else ""
+                if box_on:
+                    px, py = 12 * k, 14 * k
+                    bw_, bh_ = widths[j] + 2 * px, ch + 2 * py
+                    cx, cy = xs[j] + widths[j] / 2, base - ch / 2
+                    add(5, wa, wb, "Fx", f"{{\\an5\\pos({cx:.0f},{cy:.0f})\\1c{ass_color(acc)}\\fscx90\\fscy90\\t(0,90,\\fscx100\\fscy100){fin}\\p1}}{_rect(bw_, bh_)}")
+                parts = []
+                for i2, x2 in enumerate(grp):
+                    col = ass_color(ink) if (i2 == j and box_on) else (ass_color(acc) if i2 == j else ass_color(txt))
+                    shadow = "\\bord0\\shad0\\blur0" if (i2 == j and box_on) else f"\\bord{3.5 * k:.1f}\\3c{ass_color(ink)}\\3a&H60&\\blur{3 * k:.1f}"
+                    parts.append(f"{{\\1c{col}{shadow}}}{ass_escape(x2['w'])}")
+                add(6, wa, wb, "Fx", f"{{\\an7\\pos({x0:.0f},{top:.0f})\\fn{D}\\fs{fs:.0f}{fin}}}" + " ".join(parts))
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {W}
+PlayResY: {H}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Fx,{D},{int(70 * k)},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    return header + "\n".join(ev) + "\n"
+
+
+def write_propuesta(clip: dict, segs: list[dict], start: float, end: float, video: Path,
+                    out_mp4: Path, P: dict, cliente: str | None) -> Path:
+    """Nivel 3: propuesta para aprobar ANTES de construir con /edit-video."""
+    words = [w for s in segs for w in (s.get("words") or []) if w["end"] > start and w["start"] < end]
+    lines, cur, c0 = [], [], None
+    for w in words:
+        if c0 is None:
+            c0 = w["start"]
+        cur.append(w["w"])
+        if w["w"][-1:] in ".?!,;:" or len(cur) >= 8:
+            lines.append((c0 - start, w["end"] - start, " ".join(cur))); cur, c0 = [], None
+    if cur:
+        lines.append((c0 - start, words[-1]["end"] - start, " ".join(cur)))
+    stills = []
+    for i, frac in enumerate((0.1, 0.5, 0.9), start=1):
+        t = start + (end - start) * frac
+        img = out_mp4.with_name(f"{out_mp4.stem}-cuadro{i}.jpg")
+        run([FFMPEG, "-y", "-ss", f"{t:.2f}", "-i", str(video), "-frames:v", "1", "-q:v", "3", str(img)])
+        if img.exists():
+            stills.append((t - start, img.name))
+    beat = "\n".join(f"| {a:5.2f} | {b:5.2f} | {txt} | | | |" for a, b, txt in lines)
+    md = f"""# Propuesta · {clip.get('slug') or out_mp4.stem}  —  PENDIENTE DE APROBACIÓN
+
+> Nivel 3 · Estudio. clipper cortó el tramo limpio (`{out_mp4.name}`, {end - start:.1f} s, sin subtítulos).
+> El agente completa esta propuesta, la enseña con 2–3 cuadros de muestra y **espera el OK del
+> director** antes de construir con `/edit-video` (HyperFrames). Nada se construye sin aprobación.
+
+- **Fuente:** `{video.name}` · {start:.2f} → {end:.2f} s
+- **Cliente:** {cliente or '—'} (reglas y kit en el área de clientes)
+- **Por qué este momento:** {clip.get('why', '')}
+- **Gancho:** {clip.get('hook', '')}
+
+## 1 · Concepto (una frase)
+
+## 2 · Estilo
+Parte del kit del cliente si existe; si no, de la plantilla Editorial (tipografía, paleta papel /
+tinta / acento, tokens de movimiento IN/OUT/MOVE). Nombra la referencia visual.
+
+## 3 · Beat sheet (tiempos del clip)
+| inicio | fin | palabras | qué aparece | dónde | sonido |
+|---|---|---|---|---|---|
+{beat}
+
+## 4 · Gráficos únicos
+Mapa, datos, lista, palabra detrás de la persona, cierre con personaje… (ver `motion-design.md`).
+
+## 5 · Imágenes a generar (Higgsfield)
+| para qué | prompt | formato |
+|---|---|---|
+| fondo / textura | | |
+
+## 6 · Sonido
+SFX por evento (niveles ≤ −16 dBFS, la voz manda). Música: ¿sí/no, cuál?
+
+## 7 · Cuadros de referencia del metraje
+""" + "\n".join(f"- {t:.1f} s → `{n}`" for t, n in stills) + """
+
+---
+**APROBACIÓN:** ☐ aprobado · ☐ cambios: ______________________
+"""
+    p = out_mp4.with_name(f"{out_mp4.stem}-PROPUESTA.md")
+    p.write_text(md, encoding="utf-8")
+    return p
+
+
 # ---------------------------------------------------------------- render
 
 def check_platform(dur: float) -> list[str]:
@@ -656,7 +946,8 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
                 crf: int = 21, preset: str = "medium",
                 out_h: int = 0, fit: str = "blur", crop_x: float = 0.5,
                 cover_subs: float = 0.0, tighten: float = 0.0,
-                captions: bool = True, highlight: bool = True) -> Path | None:
+                captions: bool = True, highlight: bool = True,
+                nivel: int = 1, P: dict | None = None) -> Path | None:
     start, end = float(clip["start"]), float(clip["end"])
     if end <= start:
         print(f"  clip {idx}: rango inválido, lo salto")
@@ -678,12 +969,30 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
     cut_note = f", {len(keep) - 1} silencios fuera ({end - start:.1f}→{dur:.1f}s)" \
         if keep and len(keep) > 1 else ""
 
+    P = P or {}
+    if vertical:
+        W, H = 1080, 1920
+    elif out_h:
+        W, H = int(out_h * 16 / 9) // 2 * 2, out_h
+    else:
+        pr = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                             "stream=width,height", "-of", "csv=p=0:s=x", str(video)],
+                            capture_output=True, text=True, check=False)
+        try:
+            W, H = (int(x) for x in pr.stdout.strip().splitlines()[0].split("x"))
+        except (ValueError, IndexError):
+            W, H = 1920, 1080
+
     with tempfile.TemporaryDirectory(prefix="clipper-r-") as td:
         td = Path(td)
         ass = td / "s.ass"
-        ass.write_text(build_ass(segs if captions else [], start, end, vertical, hook,
-                                 per_chunk, cap_scale, out_h, highlight, remap),
-                       encoding="utf-8")
+        if nivel == 2:
+            body = build_ass_editorial(segs, start, end, W, H, clip, P, per_chunk, captions,
+                                       remap, dur)
+        else:
+            body = build_ass(segs if captions else [], start, end, vertical, hook,
+                             per_chunk, cap_scale, out_h, highlight, remap)
+        ass.write_text(body, encoding="utf-8")
 
         # Cadena de video: [src] → (silencios fuera) → (tapar subtítulos quemados) → encuadre → ass
         pre = "[0:v]"
@@ -692,6 +1001,9 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
             sel = "+".join(f"between(t,{a - start:.3f},{b - start:.3f})" for a, b in keep)
             chain.append(f"{pre}select='{sel}',setpts=N/FRAME_RATE/TB[vt]")
             pre = "[vt]"
+        if nivel == 2 and P.get("grade"):
+            chain.append(f"{pre}{P['grade']}[vg]")
+            pre = "[vg]"
         if cover_subs > 0:
             f = min(max(cover_subs, 0.02), 0.5)
             chain.append(f"{pre}split=2[cs0][cs1];[cs1]crop=iw:ih*{f:.3f}:0:ih*{1 - f:.3f},"
@@ -715,7 +1027,8 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
             chain.append(f"{pre}scale={ow}:{out_h}:flags=lanczos[v]")
         else:
             chain.append(f"{pre}null[v]")
-        chain.append(f"[v]ass={ass.name}[{tail}]")
+        fdir = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        chain.append(f"[v]ass={ass.name}:fontsdir={fdir}[{tail}]")
         vf = ";".join(chain)
 
         if watermark:
@@ -756,8 +1069,24 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
     return out
 
 
+def need_libass():
+    """Sin libass no hay subtítulos quemados. Mejor decirlo antes que fallar en cada clip."""
+    p = subprocess.run([FFMPEG, "-hide_banner", "-filters"], capture_output=True, text=True, check=False)
+    if " ass " in (p.stdout or ""):
+        return
+    msg = ("tu ffmpeg no trae libass (filtro 'ass'): no puede quemar subtítulos ni gráficos.\n"
+           "  macOS: el ffmpeg de Homebrew core ya no lo incluye. Usa el tap completo:\n"
+           "    brew uninstall ffmpeg && brew tap homebrew-ffmpeg/ffmpeg && "
+           "brew install homebrew-ffmpeg/ffmpeg/ffmpeg\n"
+           "  Linux: el paquete ffmpeg de la distro suele traerlo (apt install ffmpeg).\n"
+           "  Sin libass solo funciona --nivel 3 (corte limpio, sin quemar nada).")
+    die(msg)
+
+
 def cmd_render(args) -> int:
     need(FFMPEG)
+    if str(getattr(args, "nivel", "1")) != "3":
+        need_libass()
     tpath = Path(args.transcript).expanduser().resolve()
     if not tpath.exists():
         die(f"no existe {tpath}")
@@ -782,15 +1111,32 @@ def cmd_render(args) -> int:
         else video.parent / f"{video.stem}-clips"
     outdir.mkdir(parents=True, exist_ok=True)
 
+    nivel = int(args.nivel)
+    P = load_plantilla(nivel, args.plantilla, args.cliente)
+    if nivel == 3:
+        # Estudio: aquí no se quema nada. Corte limpio en el encuadre original, voz intacta,
+        # y una PROPUESTA por clip que el director aprueba antes de construir con /edit-video.
+        args.horizontal, args.no_captions, args.no_normalize = True, True, True
+        args.cover_subs, args.watermark = 0.0, None
+
     wm = None
     if args.watermark:
         wm = Path(args.watermark).expanduser().resolve()
         if not wm.exists():
             die(f"no existe la marca de agua {wm}")
+    elif P.get("logo") and nivel < 3:
+        wm = Path(P["logo"])
+        if not wm.exists():
+            print(f"  aviso: el logo del cliente no existe ({wm}); sigo sin logo")
+            wm = None
+    if wm:
+        P["_logo"] = True
 
     fixed = apply_dictionary(segs, load_dictionary(args.cliente, video.parent))
     has_words = any(s.get("words") for s in segs)
     print(f"renderizando {len(clips)} clip(s) de {video.name}")
+    print(f"  nivel {nivel} · {P.get('nombre', '')}"
+          f"{' · cliente ' + args.cliente if args.cliente else ''}")
     print(f"  formato: {'vertical 1080x1920' if not args.horizontal else 'original'}")
     print(f"  subtítulos: {'palabra por palabra' if has_words else 'por segmento'}"
           f" · fuente {FONT} · escala {args.caption_scale}x")
@@ -820,11 +1166,19 @@ def cmd_render(args) -> int:
                         not args.no_watermark_shadow, args.caption_scale,
                         args.crf, args.preset, args.out_height, args.fit, args.crop_x,
                         args.cover_subs, args.tighten, not args.no_captions,
-                        not args.no_highlight)
+                        not args.no_highlight, nivel, P)
         if r:
             made.append(r)
+            if nivel == 3:
+                prop = write_propuesta(c, segs, float(c["start"]), float(c["end"]), video,
+                                       r, P, args.cliente)
+                print(f"      propuesta: {prop.name}")
 
     print(f"\n{len(made)}/{len(clips)} listos en:\n  {outdir}")
+    if nivel == 3 and made:
+        print("\nNivel 3: completa cada *-PROPUESTA.md (concepto, gráficos, imágenes de Higgsfield,"
+              "\nsonido), enséñala con 2–3 cuadros de muestra y ESPERA el OK del director."
+              "\nCon el OK, se construye con /edit-video a partir del corte limpio.")
     return 0 if made else 1
 
 
@@ -924,7 +1278,11 @@ def main() -> int:
                    help="sin subtítulos: solo cortar (para montar después con /edit-video)")
     r.add_argument("--no-highlight", action="store_true",
                    help="sin resaltar la palabra que se está diciendo")
-    r.add_argument("--cliente", help="slug del cliente: aplica su diccionario privado")
+    r.add_argument("--cliente", help="slug del cliente: su diccionario y su plantilla (clipper.json)")
+    r.add_argument("--nivel", default="1", choices=["1", "2", "3"],
+                   help="1 clásico · 2 editorial (tipografía, paleta, detalles) · "
+                        "3 estudio (corte limpio + propuesta para /edit-video)")
+    r.add_argument("--plantilla", help="JSON que se superpone a la plantilla del nivel")
     r.set_defaults(func=cmd_render)
 
     t = sub.add_parser("tighten", help="tramos sin silencios (JSON) para montar")

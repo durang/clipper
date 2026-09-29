@@ -76,6 +76,13 @@ a.dl{color:#e8a33d;text-decoration:none;font-weight:600}
 
 <div class="card hide" id="c-op"><h2>5 &middot; Salida</h2>
 <div class="row">
+<div><label>Nivel</label><select id="nivel">
+<option value="1">1 &middot; Cl&aacute;sico &mdash; r&aacute;pido y seguro</option>
+<option value="2" selected>2 &middot; Editorial &mdash; tipograf&iacute;a, color, detalles</option>
+<option value="3">3 &middot; Estudio &mdash; corte limpio + propuesta</option></select>
+<div style="margin-top:9px"><label>Encuadre vertical</label><select id="fit">
+<option value="blur">Fondo difuminado</option><option value="crop">Recorte 9:16</option></select></div>
+<div class="chk" style="margin-top:9px"><input type="checkbox" id="cover"><label for="cover" style="margin:0;text-transform:none;letter-spacing:0;color:#eceff4">Tapar subt&iacute;tulos del original</label></div></div>
 <div><label>Formatos</label><div id="fmts"></div></div>
 <div><label>Logo / marca de agua</label><input type="file" id="wm" accept="image/png,image/webp">
 <div style="margin-top:9px"><label>Tamano del logo</label><input id="wms" type="number" step="0.01" value="0.16"></div></div>
@@ -156,7 +163,9 @@ brender.onclick=function(){var fs=Object.keys(FM).filter(function(k){
  brender.disabled=true;rstat.textContent="renderizando...";
  fetch(J(job.id)+"/render",{method:"POST",headers:{"Content-Type":"application/json"},
   body:JSON.stringify({clips:clips,formats:fs,watermark_scale:parseFloat(wms.value),
-   wpc:parseInt(wpc.value),crf:parseInt(crf.value)})}).then(poll);};
+   wpc:parseInt(wpc.value),crf:parseInt(crf.value),
+   nivel:document.getElementById("nivel").value,fit:document.getElementById("fit").value,
+   cover:document.getElementById("cover").checked})}).then(poll);};
 function showOut(){document.getElementById("c-out").classList.remove("hide");
  rstat.innerHTML="<span class='ok'>OK listo</span>";
  var h=(job.outputs||[]).map(function(o){

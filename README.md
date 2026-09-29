@@ -44,7 +44,9 @@ diferencia entre un clip que funciona y uno que no.
 
 Requisitos:
 
-- `ffmpeg` compilado con **libass** (para quemar subtítulos)
+- `ffmpeg` compilado con **libass** (para quemar subtítulos). **macOS:** el ffmpeg de Homebrew core
+  ya no lo trae; usa `brew tap homebrew-ffmpeg/ffmpeg && brew install homebrew-ffmpeg/ffmpeg/ffmpeg`.
+  `clipper.py render` lo comprueba al empezar y te dice cómo arreglarlo.
 - `whisper` de OpenAI (`pip install -U openai-whisper`)
 - `yt-dlp` — opcional, solo para `fetch` (`pip install -U yt-dlp`)
 - Python 3.9+
@@ -188,6 +190,36 @@ Opciones:
 Todo lo de encuadre se puede fijar **por clip** en el JSON (`fit`, `crop_x`, `tighten`,
 `cover_subs`): el agente mira los frames de cada momento y decide dónde está la cara.
 
+### Tres niveles
+
+```bash
+python3 clipper.py render t.json clips.json --nivel 1    # Clásico (default)
+python3 clipper.py render t.json clips.json --nivel 2    # Editorial
+python3 clipper.py render t.json clips.json --nivel 3    # Estudio: corte limpio + propuesta
+```
+
+| Nivel | Qué es | Cuándo |
+|---|---|---|
+| **1 · Clásico** | Blanco con contorno, palabra activa en amarillo, gancho, logo con sombra | Volumen, rápido, cualquier red |
+| **2 · Editorial** | Tipografía de estudio (Inter Tight, Instrument Serif, JetBrains Mono — incluidas en `fonts/`, OFL), paleta tinta/papel/acento, **palabra activa sobre caja de color**, rótulo superior (`kicker` + `fuente`), barra de progreso, gancho en dos líneas (`"hook": "Lo que\|nadie te dice"` → serif + display), degradados suaves de legibilidad y un grade de color | Marca, clientes, piezas que tienen que verse caras sin motion |
+| **3 · Estudio** | No quema nada: corta limpio en el encuadre original con la voz intacta y escribe `NN-slug-PROPUESTA.md` con el beat sheet ya cronometrado y 3 cuadros de referencia | Los 1–3 mejores momentos. La propuesta se completa (concepto, gráficos, imágenes de Higgsfield, sonido), **el director la aprueba**, y se construye con [`/edit-video`](https://github.com/durang/edit-video) |
+
+El nivel 2 coloca cada elemento con las **métricas reales de las fuentes** (`fonts/metrics.json`):
+la caja de la palabra activa mide exactamente la palabra, los bloques nunca se salen del cuadro, y el
+subtítulo queda en la zona segura. Sin dependencias: sigue siendo solo librería estándar.
+
+**Plantillas:** `plantillas/1-clasico.json`, `2-editorial.json`, `3-estudio.json`. Encima se superpone
+la del cliente (`<área de clientes>/clients/<slug>/clipper.json`: colores, rótulos, logo) con
+`--cliente`, y encima un JSON propio con `--plantilla`. Ejemplo de cliente:
+
+```json
+{ "colores": { "acento": "#FFD23F" },
+  "rotulo": { "izquierda": "Nearshoring", "derecha": "Source: acme" },
+  "logo": "kit/logo.png" }
+```
+
+Por clip también: `"kicker"` (rótulo), `"fuente"` (texto de la derecha), `"hook"`.
+
 ### El campo `hook`
 
 Si un clip trae `hook`, ese texto aparece **grande, en amarillo, arriba, los
@@ -310,6 +342,10 @@ Y sobre una entrevista real de feria (inglés, subtítulos quemados, 2 vCPU):
 - Palabra activa en amarillo, subtítulo por encima de y = 1536, franja inferior del original difuminada
 - `--tighten`: audio y video salen con la misma duración (13.07 / 13.10 s) y los subtítulos siguen a la voz
 - 3 clips (40 s de salida) en vertical, preset veryfast: **69 s** de render en 2 vCPU
+- Nivel 2 vertical, 13 s con gancho, rótulo, caja por palabra y barra: **48 s** en 2 vCPU (ultrafast);
+  la caja de la palabra activa cae exacta sobre la palabra (métricas medidas contra libass: error < 1 px)
+- Nivel 2 horizontal 1920×1080 y nivel 3 (corte 1920×1080 + propuesta + 3 cuadros): correctos
+- Arreglado: `studio.py` buscaba `clipper-studio.html` y el repo trae `studio.html` (la página no cargaba)
 
 ---
 
@@ -369,6 +405,7 @@ whisper — que en CPU es la parte lenta. Con `--force` la rehace.
 | **Corte por escena** | `ffmpeg` detecta cambios de escena; alinear los cortes ahí evita empezar a media palabra visual. | medio |
 | **Modo lote** | Una carpeta de grabaciones → analizar todas de un tirón. | bajo |
 | **Exportar miniaturas** | Frame representativo por clip, listo para portada. | bajo |
+| **Nivel 2 animado por palabra** | Entradas por letra/palabra más ricas (ASS `\t`) sin llegar a HyperFrames. | medio |
 | **Recorte por cara automático** | Detectar la cara en los frames y fijar `crop_x` solo. Hoy lo decide el agente mirando los frames. | medio |
 | **Recorte por hablante activo** | Con dos personas en cuadro, seguir a quien habla. | alto |
 | **Silencios por energía** | Complementar `--tighten` con `silencedetect` cuando los tiempos por palabra vienen pegados. | bajo |

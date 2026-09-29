@@ -20,7 +20,10 @@ JOBS = ROOT / "jobs"; DICT_FILE = ROOT / "dictionary.json"
 os.environ.setdefault("CLIPPER_DICT", str(DICT_FILE))
 JOBS.mkdir(parents=True, exist_ok=True)
 LOCK = threading.Lock(); RUNNING: dict = {}
-PAGE_FILE = Path(__file__).with_name("clipper-studio.html")
+# El repo trae studio.html; se acepta también el nombre antiguo.
+PAGE_FILE = next((p for p in (Path(__file__).with_name("studio.html"),
+                              Path(__file__).with_name("clipper-studio.html")) if p.exists()),
+                 Path(__file__).with_name("studio.html"))
 
 FORMATS = {
  "vertical":   {"args": [], "caption": 1.0},
@@ -99,7 +102,8 @@ def do_render(jid, cfg):
         if job.get("watermark"):
             wm = ["--watermark", job["watermark"], "--watermark-scale", str(cfg.get("watermark_scale",0.16))]
         outdirs=[]
-        for key in cfg["formats"]:
+        fmts = cfg["formats"][:1] if str(cfg.get("nivel")) == "3" else cfg["formats"]   # nivel 3: un solo corte limpio
+        for key in fmts:
             spec = FORMATS.get(key)
             if not spec: continue
             od = d/"out"/key; od.mkdir(parents=True, exist_ok=True)
@@ -107,13 +111,15 @@ def do_render(jid, cfg):
             cmd = [PYTHON, CLIPPER, "render", job["transcript"], "clips.json", *spec["args"], *wm,
                    "--caption-scale", str(cs), "--words-per-caption", str(cfg.get("wpc",3)),
                    "--crf", str(cfg.get("crf",19)), "--preset", cfg.get("preset","medium"),
-                   "--outdir", str(od)]
+                   "--outdir", str(od),
+                   "--nivel", str(cfg.get("nivel", "1")), "--fit", cfg.get("fit", "blur")]
+            if cfg.get("cover"): cmd += ["--cover-subs", "0.2"]
             log(job, f"--- formato {key} ---")
             if run(cmd, job, cwd=d) == 0: outdirs.append(od)
             else: log(job, f"formato {key} fallo")
         outs=[]
         for od in outdirs:
-            for f in sorted(od.glob("*.mp4")):
+            for f in sorted(list(od.glob("*.mp4")) + list(od.glob("*-PROPUESTA.md"))):
                 outs.append({"rel":str(f.relative_to(d)),"name":f.name,"fmt":od.name,
                              "mb":round(f.stat().st_size/1048576,2)})
         if outs:
