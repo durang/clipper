@@ -1,3 +1,16 @@
+> ## ➜ clipper vive ahora dentro de [`durang/edit-video`](https://github.com/durang/edit-video/tree/main/clipper)
+>
+> Desde el 2026-09-29 clipper es el motor de los **niveles 1 (Recorte) y 2 (Editorial)** de
+> `/edit-video`, y hace el corte limpio del **nivel 3 (Estudio)**. El desarrollo sigue allí, con todo
+> su historial. Este repo queda como referencia; no recibe más cambios.
+>
+> ```bash
+> npx skills add durang/edit-video -g -y      # el skill, con clipper dentro
+> python3 ~/.agents/skills/edit-video/clipper/clipper.py --help
+> ```
+
+---
+
 # clipper
 
 De video largo a clips verticales con subtítulos quemados.
