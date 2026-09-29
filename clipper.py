@@ -12,6 +12,9 @@ Diseño en fases, a propósito:
 La fase 2 NO se automatiza con heurísticas de silencio. Elegir qué momento vale
 la pena es criterio, y el criterio se delega a quien tiene contexto.
 
+Extras: `dict` (diccionario permanente de nombres) y `tighten` (tramos sin silencios).
+El idioma se detecta o se verifica antes de transcribir; nunca se asume.
+
 Requisitos: ffmpeg (con libass), whisper. Opcional: yt-dlp para `fetch`.
 """
 
@@ -21,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -115,6 +119,151 @@ def ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "(").replace("}", ")").strip()
 
 
+# ---------------------------------------------------------------- idioma
+
+# Whisper acepta código o nombre; normalizamos a nombre en minúsculas para comparar.
+LANG_NAMES = {
+    "es": "spanish", "en": "english", "pt": "portuguese", "fr": "french",
+    "it": "italian", "de": "german", "ca": "catalan", "nl": "dutch",
+    "ja": "japanese", "zh": "chinese", "ko": "korean", "ru": "russian",
+}
+
+
+def lang_name(lang: str) -> str:
+    l = (lang or "").strip().lower()
+    return LANG_NAMES.get(l, l)
+
+
+def detect_language(wav: Path, total: float) -> str | None:
+    """Detecta el idioma con 30 s de audio y el modelo tiny.
+
+    Se toma desde el 10 % del video (máx. 60 s) para esquivar intros y música.
+    Devuelve el nombre en minúsculas ("english") o None si no se pudo — nunca adivina.
+    """
+    ss = min(60.0, total * 0.10)
+    with tempfile.TemporaryDirectory(prefix="clipper-lang-") as td:
+        sample = Path(td) / "lang.wav"
+        run([FFMPEG, "-y", "-ss", f"{ss:.2f}", "-t", "30", "-i", str(wav),
+             "-ar", "16000", "-ac", "1", str(sample)])
+        if not sample.exists():
+            return None
+        p = subprocess.run([WHISPER, str(sample), "--model", "tiny",
+                            "--output_format", "txt", "--output_dir", td,
+                            "--fp16", "False"],
+                           capture_output=True, text=True, check=False)
+    m = re.search(r"Detected language:\s*([A-Za-z ]+)", (p.stdout or "") + (p.stderr or ""))
+    return m.group(1).strip().lower() if m else None
+
+
+# ---------------------------------------------------------------- diccionario
+
+def _config_value(key: str) -> str | None:
+    conf = Path.home() / ".config/edit-video/config"
+    if conf.exists():
+        m = re.search(rf'{key}="([^"]*)"', conf.read_text(encoding="utf-8"))
+        if m:
+            return m.group(1)
+    return None
+
+
+def dictionary_layers(cliente: str | None, project: Path | None) -> list[Path]:
+    """Capas del diccionario permanente; la última gana.
+
+    1. ~/clipper-studio/dictionary.json   (el que edita Clipper Studio; CLIPPER_DICT lo cambia)
+    2. ~/.config/edit-video/diccionario.json   (compartido con /edit-video)
+    3. <área de clientes>/clients/<cliente>/diccionario.json   (privado: marcas, nombres)
+    4. <carpeta del video>/diccionario.json
+    """
+    layers = [Path(os.environ.get("CLIPPER_DICT",
+                                  str(Path.home() / "clipper-studio" / "dictionary.json"))),
+              Path.home() / ".config/edit-video/diccionario.json"]
+    if cliente:
+        area = os.environ.get("EDIT_VIDEO_CLIENTS") or _config_value("EDIT_VIDEO_CLIENTS") \
+            or str(Path.home() / ".agents/edit-video-clients")
+        layers.append(Path(area) / "clients" / cliente / "diccionario.json")
+    if project:
+        layers.append(project / "diccionario.json")
+    return layers
+
+
+def load_dictionary(cliente: str | None, project: Path | None) -> dict:
+    fixes = {}
+    for p in dictionary_layers(cliente, project):
+        try:
+            fixes.update(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {k: v for k, v in fixes.items() if k.strip() and k != v}
+
+
+_norm = lambda t: re.sub(r"[^\w']+", "", t.lower())
+_edge = re.compile(r"^(\W*)(.*?)(\W*)$", re.S)
+
+
+def apply_dictionary(segs: list[dict], fixes: dict) -> int:
+    """Corrige nombres en texto Y en palabras, con palabra completa.
+
+    - "sol" nunca toca "girasol" (límite de palabra).
+    - Correcciones de varias palabras ("near Turing" → "nearshoring") funden los
+      tokens de `words` y conservan el inicio del primero y el final del último,
+      para que el subtítulo palabra por palabra también salga bien.
+    Idempotente: se puede aplicar en analyze y otra vez en render.
+    """
+    if not fixes:
+        return 0
+    rules = sorted(((k.split(), v) for k, v in fixes.items()), key=lambda r: -len(r[0]))
+    n = 0
+    for seg in segs:
+        for bad, good in fixes.items():
+            pat = re.compile(r"(?<!\w)" + r"\s+".join(map(re.escape, bad.split())) + r"(?!\w)", re.I)
+            seg["text"], k = pat.subn(good, seg.get("text", ""))
+            if not seg.get("words"):
+                n += k
+        ws, out, i = seg.get("words") or [], [], 0
+        while i < len(ws):
+            hit = None
+            for toks, good in rules:
+                k = len(toks)
+                if i + k <= len(ws) and all(_norm(ws[i + j]["w"]) == _norm(toks[j]) for j in range(k)):
+                    hit = (k, good)
+                    break
+            if not hit:
+                out.append(ws[i]); i += 1
+                continue
+            k, good = hit
+            lead = _edge.match(ws[i]["w"]).group(1)
+            trail = _edge.match(ws[i + k - 1]["w"]).group(3)
+            new = f"{lead}{good}{trail}"
+            if new != ws[i]["w"] or k > 1:
+                n += 1
+            out.append({"w": new, "start": ws[i]["start"], "end": ws[i + k - 1]["end"]})
+            i += k
+        if ws:
+            seg["words"] = out
+    return n
+
+
+def cmd_dict(args) -> int:
+    if args.accion == "ver":
+        for k, v in sorted(load_dictionary(args.cliente, Path.cwd()).items()):
+            print(f"{k}  →  {v}")
+        return 0
+    if not (args.mal and args.bien):
+        die('uso: clipper.py dict agregar "mal escrito" "Bien Escrito" [--cliente SLUG]')
+    layers = dictionary_layers(args.cliente, None)
+    target = layers[-1] if args.cliente else layers[0]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        d = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        d = {}
+    d[args.mal] = args.bien
+    target.write_text(json.dumps(dict(sorted(d.items(), key=lambda x: x[0].lower())),
+                                 ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"✓ {args.mal!r} → {args.bien!r}  en {target}")
+    return 0
+
+
 # ---------------------------------------------------------------- fetch
 
 def cmd_fetch(args) -> int:
@@ -163,7 +312,8 @@ def cmd_fetch(args) -> int:
     if args.analyze:
         print()
         ns = argparse.Namespace(video=str(path), model=args.model,
-                                lang=args.lang, out=None, words=True, force=False)
+                                lang=args.lang, out=None, words=True, force=False,
+                                force_lang=False, cliente=getattr(args, "cliente", None))
         return cmd_analyze(ns)
 
     print(f"\nsigue:  clipper.py analyze '{path.name}'")
@@ -181,14 +331,37 @@ class Segment:
     words: list = field(default_factory=list)
 
 
+def resolve_language(wav: Path, total: float, lang: str, force: bool) -> str:
+    """auto → detecta. Dado → verifica. Nunca transcribe en el idioma equivocado.
+
+    Error real que esto evita: inglés transcrito como español, 50 minutos perdidos.
+    """
+    if force and lang != "auto":
+        return lang
+    print("  detectando idioma (30 s, modelo tiny)…", flush=True)
+    det = detect_language(wav, total)
+    if lang == "auto":
+        if not det:
+            die("no pude detectar el idioma. Pásalo con --lang es|en|pt…", 2)
+        print(f"  idioma detectado: {det}")
+        return det
+    if det and lang_name(det) != lang_name(lang):
+        die(f"pediste '{lang}' pero el audio suena a '{det}'. "
+            f"Repite con --lang {det}, o --force-lang si estás seguro.", 3)
+    if det:
+        print(f"  idioma verificado: {det}")
+    return lang
+
+
 def transcribe(video: Path, workdir: Path, model: str, lang: str,
-               words: bool) -> list[Segment]:
+               words: bool, force_lang: bool = False) -> tuple[list[Segment], str]:
     wav = workdir / "audio.wav"
     print("  extrayendo audio…", flush=True)
     rc = run([FFMPEG, "-y", "-i", str(video), "-ar", "16000", "-ac", "1",
               "-c:a", "pcm_s16le", str(wav)])
     if rc.returncode != 0 or not wav.exists():
         die("ffmpeg no pudo extraer el audio")
+    lang = resolve_language(wav, duration_of(video), lang, force_lang)
 
     cmd = [WHISPER, str(wav), "--model", model, "--language", lang,
            "--task", "transcribe", "--output_format", "json",
@@ -220,7 +393,7 @@ def transcribe(video: Path, workdir: Path, model: str, lang: str,
             except (KeyError, TypeError, ValueError):
                 continue
         segs.append(Segment(i, float(s["start"]), float(s["end"]), txt, ws))
-    return segs
+    return segs, lang
 
 
 def cmd_analyze(args) -> int:
@@ -254,10 +427,17 @@ def cmd_analyze(args) -> int:
     print(f"analizando {video.name}  ({total/60:.1f} min)")
 
     with tempfile.TemporaryDirectory(prefix="clipper-") as td:
-        segs = transcribe(video, Path(td), args.model, args.lang, args.words)
+        segs, lang = transcribe(video, Path(td), args.model, args.lang, args.words,
+                                getattr(args, "force_lang", False))
 
     if not segs:
         die("la transcripción salió vacía")
+
+    # Diccionario permanente: corrige nombres antes de que nadie lea la transcripción.
+    segs_d = [asdict(s) for s in segs]
+    fixed = apply_dictionary(segs_d, load_dictionary(getattr(args, "cliente", None), video.parent))
+    if fixed:
+        print(f"  diccionario: {fixed} correcciones")
 
     word_total = sum(len(s.words) for s in segs)
     payload = {
@@ -265,17 +445,17 @@ def cmd_analyze(args) -> int:
         "fingerprint": fp,
         "duration_sec": round(total, 2),
         "model": args.model,
-        "language": args.lang,
+        "language": lang,
         "segment_count": len(segs),
-        "word_count": word_total,
-        "segments": [asdict(s) for s in segs],
+        "word_count": sum(len(s["words"]) for s in segs_d),
+        "segments": segs_d,
     }
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     readable = out.with_suffix(".txt")
     lines = [f"# {video.name} · {total/60:.1f} min · {len(segs)} segmentos", ""]
-    for s in segs:
-        lines.append(f"[{s.start:7.1f} → {s.end:7.1f}]  {s.text}")
+    for s in segs_d:
+        lines.append(f"[{s['start']:7.1f} → {s['end']:7.1f}]  {s['text']}")
     readable.write_text("\n".join(lines), encoding="utf-8")
 
     print("\nlisto:")
@@ -293,7 +473,7 @@ ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
-WrapStyle: 2
+WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
@@ -306,32 +486,75 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-def chunk_words(words: list[dict], start: float, end: float,
-                per_chunk: int) -> list[tuple[float, float, str]]:
-    """Agrupa palabras en bloques cortos — el estilo que domina en Reels."""
+# Zona segura vertical: Reels/TikTok/Shorts tapan el 20 % inferior (y > 1536 en 1920) con el
+# texto del post, el usuario y los botones. El subtítulo tiene que quedar por encima.
+VERTICAL_CAP_MARGIN = 500
+HIGHLIGHT = "&H0000E5FF&"          # amarillo (BGR de ASS), el mismo del gancho
+
+
+def tighten_ranges(words: list[dict], start: float, end: float,
+                   gap: float = 0.35, pad: float = 0.12) -> list[tuple[float, float]]:
+    """Tramos a CONSERVAR dentro de [start, end], quitando silencios > gap.
+
+    Solo corta ENTRE palabras (nunca dentro de una) y deja `pad` de aire a cada lado.
+    Tiempos absolutos del video fuente.
+    """
     inside = [w for w in words if w["end"] > start and w["start"] < end]
-    out = []
-    for i in range(0, len(inside), per_chunk):
-        grp = inside[i:i + per_chunk]
-        a = max(grp[0]["start"], start) - start
-        b = min(grp[-1]["end"], end) - start
-        if b - a < 0.08:
-            b = a + 0.08
-        text = " ".join(w["w"] for w in grp)
-        out.append((a, b, text))
+    if not inside:
+        return [(start, end)]
+    keep, a = [], start
+    for w0, w1 in zip(inside, inside[1:]):
+        if w1["start"] - w0["end"] > gap:
+            keep.append((a, min(w0["end"] + pad, end)))
+            a = max(w1["start"] - pad, start)
+    keep.append((a, end))
+    return [(x, y) for x, y in keep if y - x > 0.05]
+
+
+def make_remap(keep: list[tuple[float, float]], start: float):
+    """Tiempo absoluto del fuente → tiempo dentro del clip ya recortado."""
+    def f(t: float) -> float:
+        acc = 0.0
+        for a, b in keep:
+            if t < a:
+                return acc
+            if t <= b:
+                return acc + (t - a)
+            acc += b - a
+        return acc
+    return f if keep else (lambda t: t - start)
+
+
+def chunk_words(words: list[dict], start: float, end: float,
+                per_chunk: int, max_chars: int = 0) -> list[list[dict]]:
+    """Agrupa palabras en bloques cortos — el estilo que domina en Reels.
+
+    Además de `per_chunk` palabras, respeta `max_chars` para que el bloque QUEPA en una línea:
+    un bloque largo ("Colombia, first nearshoring,") se salía por los dos lados del cuadro.
+    """
+    inside = [w for w in words if w["end"] > start and w["start"] < end]
+    out, cur = [], []
+    for w in inside:
+        text_len = len(" ".join(x["w"] for x in cur + [w]))
+        if cur and (len(cur) >= per_chunk or (max_chars and text_len > max_chars)):
+            out.append(cur); cur = []
+        cur.append(w)
+    if cur:
+        out.append(cur)
     return out
 
 
 def build_ass(segs: list[dict], start: float, end: float, vertical: bool,
               hook: str | None, per_chunk: int, cap_scale: float = 1.0,
-              out_h: int = 0) -> str:
+              out_h: int = 0, highlight: bool = True, remap=None) -> str:
     # El tamano base se define contra 720p horizontal / 1920 vertical.
     # Si el lienzo crece, la letra crece en proporcion para verse igual.
     prop = (out_h / 720.0) if (out_h and not vertical) else 1.0
     cap_size = int((96 if vertical else 54) * cap_scale * prop)
     hook_size = int((76 if vertical else 44) * cap_scale * prop)
     body = ASS_HEADER.format(font=FONT, cap_size=cap_size, hook_size=hook_size,
-                             cap_margin=260 if vertical else int(90 * prop))
+                             cap_margin=VERTICAL_CAP_MARGIN if vertical else int(90 * prop))
+    T = remap or (lambda t: t - start)
     events = []
 
     all_words = []
@@ -339,17 +562,36 @@ def build_ass(segs: list[dict], start: float, end: float, vertical: bool,
         all_words.extend(s.get("words") or [])
 
     if all_words:
-        for a, b, text in chunk_words(all_words, start, end, per_chunk):
-            events.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Cap,,0,0,0,,"
-                          f"{ass_escape(text)}")
+        # Caracteres que caben en una línea al tamaño actual (letra negrita ≈ 0.6 em de ancho).
+        usable = (1080 - 2 * 60) if vertical else ((out_h * 16 // 9 if out_h else 1280) - 120)
+        max_chars = max(8, int(usable / (cap_size * 0.6)))
+        for grp in chunk_words(all_words, start, end, per_chunk, max_chars):
+            a = T(max(grp[0]["start"], start))
+            b = T(min(grp[-1]["end"], end))
+            if b - a < 0.08:
+                b = a + 0.08
+            if not highlight:
+                text = " ".join(ass_escape(w["w"]) for w in grp)
+                events.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Cap,,0,0,0,,{text}")
+                continue
+            # Palabra activa resaltada: un evento por palabra, el bloque entero visible.
+            for j, w in enumerate(grp):
+                wa = a if j == 0 else T(w["start"])
+                wb = b if j == len(grp) - 1 else T(grp[j + 1]["start"])
+                if wb - wa < 0.02:
+                    continue
+                parts = [(f"{{\\1c{HIGHLIGHT}}}{ass_escape(x['w'])}{{\\1c&H00FFFFFF&}}"
+                          if k == j else ass_escape(x["w"])) for k, x in enumerate(grp)]
+                events.append(f"Dialogue: 0,{ass_time(wa)},{ass_time(wb)},Cap,,0,0,0,,"
+                              f"{' '.join(parts)}")
     else:
         # Sin tiempos por palabra: caemos a subtítulo por segmento.
         for s in segs:
             s0, s1 = float(s["start"]), float(s["end"])
             if s1 <= start or s0 >= end:
                 continue
-            a = max(s0, start) - start
-            b = min(s1, end) - start
+            a = T(max(s0, start))
+            b = T(min(s1, end))
             if b - a < 0.05:
                 continue
             events.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Cap,,0,0,0,,"
@@ -412,51 +654,87 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
                 wm_pos: str = "top-right", wm_scale: float = 0.22,
                 wm_shadow: bool = True, cap_scale: float = 1.0,
                 crf: int = 21, preset: str = "medium",
-                out_h: int = 0) -> Path | None:
+                out_h: int = 0, fit: str = "blur", crop_x: float = 0.5,
+                cover_subs: float = 0.0, tighten: float = 0.0,
+                captions: bool = True, highlight: bool = True) -> Path | None:
     start, end = float(clip["start"]), float(clip["end"])
     if end <= start:
         print(f"  clip {idx}: rango inválido, lo salto")
         return None
 
     slug = (clip.get("slug") or f"clip{idx:02d}").strip().replace(" ", "-")[:48]
-    dur = end - start
     out = outdir / f"{idx:02d}-{slug}.mp4"
     hook = clip.get("hook")
+    # Por clip se puede sobreescribir: el agente mira los frames y decide el encuadre.
+    fit = clip.get("fit", fit)
+    crop_x = float(clip.get("crop_x", crop_x))
+    cover_subs = float(clip.get("cover_subs", cover_subs))
+    tighten = float(clip.get("tighten", tighten))
+
+    all_words = [w for sg in segs for w in (sg.get("words") or [])]
+    keep = tighten_ranges(all_words, start, end, tighten) if tighten > 0 else []
+    remap = make_remap(keep, start) if keep else None
+    dur = sum(b - a for a, b in keep) if keep else end - start
+    cut_note = f", {len(keep) - 1} silencios fuera ({end - start:.1f}→{dur:.1f}s)" \
+        if keep and len(keep) > 1 else ""
 
     with tempfile.TemporaryDirectory(prefix="clipper-r-") as td:
         td = Path(td)
         ass = td / "s.ass"
-        ass.write_text(build_ass(segs, start, end, vertical, hook, per_chunk,
-                                 cap_scale, out_h), encoding="utf-8")
+        ass.write_text(build_ass(segs if captions else [], start, end, vertical, hook,
+                                 per_chunk, cap_scale, out_h, highlight, remap),
+                       encoding="utf-8")
+
+        # Cadena de video: [src] → (silencios fuera) → (tapar subtítulos quemados) → encuadre → ass
+        pre = "[0:v]"
+        chain = []
+        if keep and len(keep) > 1:
+            sel = "+".join(f"between(t,{a - start:.3f},{b - start:.3f})" for a, b in keep)
+            chain.append(f"{pre}select='{sel}',setpts=N/FRAME_RATE/TB[vt]")
+            pre = "[vt]"
+        if cover_subs > 0:
+            f = min(max(cover_subs, 0.02), 0.5)
+            chain.append(f"{pre}split=2[cs0][cs1];[cs1]crop=iw:ih*{f:.3f}:0:ih*{1 - f:.3f},"
+                         f"boxblur=24:3[band];[cs0][band]overlay=0:main_h*{1 - f:.3f}[vc]")
+            pre = "[vc]"
 
         tail = "vo" if not watermark else "vsub"
-        if vertical:
-            vf = (
-                "[0:v]split=2[bg][fg];"
+        if vertical and fit == "crop":
+            # Recorte 9:16 centrado en crop_x (0 = izquierda, 1 = derecha): sin franjas ni borroso.
+            cx = min(max(crop_x, 0.0), 1.0)
+            chain.append(f"{pre}scale=-2:1920,crop=1080:1920:(iw-1080)*{cx:.3f}:0[v]")
+        elif vertical:
+            chain.append(
+                f"{pre}split=2[bg][fg];"
                 "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
                 "crop=1080:1920,gblur=sigma=22[bgb];"
                 "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgs];"
-                f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v];[v]ass={ass.name}[{tail}]"
-            )
+                "[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v]")
+        elif out_h:
+            ow = int(out_h * 16 / 9) // 2 * 2
+            chain.append(f"{pre}scale={ow}:{out_h}:flags=lanczos[v]")
         else:
-            if out_h:
-                ow = int(out_h * 16 / 9) // 2 * 2
-                vf = (f"[0:v]scale={ow}:{out_h}:flags=lanczos[vs0];"
-                      f"[vs0]ass={ass.name}[{tail}]")
-            else:
-                vf = f"[0:v]ass={ass.name}[{tail}]"
+            chain.append(f"{pre}null[v]")
+        chain.append(f"[v]ass={ass.name}[{tail}]")
+        vf = ";".join(chain)
 
         if watermark:
             fw = 0 if vertical or not out_h else int(out_h * 16 / 9) // 2 * 2
             vf += watermark_chain(tail, vertical, wm_pos, wm_scale, wm_shadow, fw)
 
-        cmd = [FFMPEG, "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+        cmd = [FFMPEG, "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
                "-i", str(video)]
         if watermark:
             cmd += ["-i", str(watermark)]
         cmd += ["-filter_complex", vf, "-map", "[vo]", "-map", "0:a?"]
+        af = []
+        if keep and len(keep) > 1:
+            asel = "+".join(f"between(t,{a - start:.3f},{b - start:.3f})" for a, b in keep)
+            af.append(f"aselect='{asel}',asetpts=N/SR/TB")
         if normalize:
-            cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
+            af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+        if af:
+            cmd += ["-af", ",".join(af)]
         cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart", str(out)]
@@ -474,7 +752,7 @@ def render_clip(video: Path, segs: list[dict], clip: dict, outdir: Path,
     warns = check_platform(dur)
     if warns:
         note = f"  ⚠ excede {', '.join(warns)}"
-    print(f"  clip {idx}: {out.name}  ({dur:.1f}s, {out.stat().st_size/1e6:.1f} MB){note}")
+    print(f"  clip {idx}: {out.name}  ({dur:.1f}s, {out.stat().st_size/1e6:.1f} MB{cut_note}){note}")
     return out
 
 
@@ -510,11 +788,22 @@ def cmd_render(args) -> int:
         if not wm.exists():
             die(f"no existe la marca de agua {wm}")
 
+    fixed = apply_dictionary(segs, load_dictionary(args.cliente, video.parent))
     has_words = any(s.get("words") for s in segs)
     print(f"renderizando {len(clips)} clip(s) de {video.name}")
     print(f"  formato: {'vertical 1080x1920' if not args.horizontal else 'original'}")
     print(f"  subtítulos: {'palabra por palabra' if has_words else 'por segmento'}"
           f" · fuente {FONT} · escala {args.caption_scale}x")
+    if args.no_captions:
+        print("  subtítulos: NO (solo cortar — para montar después con /edit-video)")
+    elif fixed:
+        print(f"  diccionario: {fixed} correcciones aplicadas")
+    if not args.horizontal:
+        print(f"  encuadre: {'recorte 9:16 en x=' + str(args.crop_x) if args.fit == 'crop' else 'fondo difuminado'}")
+    if args.tighten:
+        print(f"  silencios: fuera los > {args.tighten}s (nunca dentro de una palabra)")
+    if args.cover_subs:
+        print(f"  subtítulos del original: tapados ({int(args.cover_subs*100)}% inferior)")
     print(f"  audio: {'normalizado EBU R128' if not args.no_normalize else 'sin tocar'} · 192k")
     print(f"  calidad: CRF {args.crf} · preset {args.preset}")
     if wm:
@@ -529,12 +818,33 @@ def cmd_render(args) -> int:
                         args.words_per_caption, not args.no_normalize,
                         wm, args.watermark_pos, args.watermark_scale,
                         not args.no_watermark_shadow, args.caption_scale,
-                        args.crf, args.preset, args.out_height)
+                        args.crf, args.preset, args.out_height, args.fit, args.crop_x,
+                        args.cover_subs, args.tighten, not args.no_captions,
+                        not args.no_highlight)
         if r:
             made.append(r)
 
     print(f"\n{len(made)}/{len(clips)} listos en:\n  {outdir}")
     return 0 if made else 1
+
+
+def cmd_tighten(args) -> int:
+    """Imprime los tramos a conservar sin silencios (JSON). Lo consume /edit-video para su rough cut."""
+    tdata = json.loads(Path(args.transcript).expanduser().read_text(encoding="utf-8"))
+    words = [w for s in tdata["segments"] for w in (s.get("words") or [])]
+    if not words:
+        die("la transcripción no tiene tiempos por palabra (analyze sin --no-words)")
+    start = args.start if args.start is not None else 0.0
+    end = args.end if args.end is not None else float(tdata.get("duration_sec") or words[-1]["end"])
+    keep = tighten_ranges(words, start, end, args.gap, args.pad)
+    kept = sum(b - a for a, b in keep)
+    json.dump({"source": tdata.get("source"), "gap": args.gap, "pad": args.pad,
+               "original_sec": round(end - start, 2), "kept_sec": round(kept, 2),
+               "cuts": len(keep) - 1,
+               "keep": [{"start": round(a, 3), "end": round(b, 3)} for a, b in keep]},
+              sys.stdout, ensure_ascii=False, indent=2)
+    print(f"\n{end - start:.1f}s → {kept:.1f}s, {len(keep) - 1} cortes", file=sys.stderr)
+    return 0
 
 
 # ---------------------------------------------------------------- cli
@@ -556,14 +866,19 @@ def main() -> int:
     f.add_argument("--analyze", action="store_true",
                    help="transcribir inmediatamente después de bajar")
     f.add_argument("--model", default="base")
-    f.add_argument("--lang", default="Spanish")
+    f.add_argument("--lang", default="auto", help="auto (detecta) | es | en | …")
+    f.add_argument("--cliente", help="slug del cliente: aplica su diccionario privado")
     f.set_defaults(func=cmd_fetch)
 
     a = sub.add_parser("analyze", help="transcribe con marcas de tiempo")
     a.add_argument("video")
     a.add_argument("--model", default="base",
                    help="tiny|base|small|medium (default: base)")
-    a.add_argument("--lang", default="Spanish")
+    a.add_argument("--lang", default="auto",
+                   help="auto = detecta (default). Si lo pasas, se verifica contra el audio")
+    a.add_argument("--force-lang", action="store_true",
+                   help="no verificar el idioma pasado con --lang")
+    a.add_argument("--cliente", help="slug del cliente: aplica su diccionario privado")
     a.add_argument("--out", help="ruta del .transcript.json")
     a.add_argument("--no-words", dest="words", action="store_false",
                    help="sin tiempos por palabra (más rápido)")
@@ -597,7 +912,35 @@ def main() -> int:
                    help="multiplicador del tamano de subtitulo (1.4 = 40%% mas grande)")
     r.add_argument("--no-watermark-shadow", action="store_true",
                    help="sin sombra bajo el logo (logos oscuros no la necesitan)")
+    r.add_argument("--fit", default="blur", choices=["blur", "crop"],
+                   help="vertical: blur = fondo difuminado; crop = recorte 9:16 sin franjas")
+    r.add_argument("--crop-x", type=float, default=0.5,
+                   help="con --fit crop: centro horizontal del recorte, 0..1 (por clip: crop_x)")
+    r.add_argument("--tighten", type=float, default=0.0, metavar="SEG",
+                   help="quita silencios mayores a SEG segundos (0.35 recomendado)")
+    r.add_argument("--cover-subs", type=float, default=0.0, metavar="FRAC",
+                   help="difumina la franja inferior del original (subtítulos quemados), 0.15–0.25")
+    r.add_argument("--no-captions", action="store_true",
+                   help="sin subtítulos: solo cortar (para montar después con /edit-video)")
+    r.add_argument("--no-highlight", action="store_true",
+                   help="sin resaltar la palabra que se está diciendo")
+    r.add_argument("--cliente", help="slug del cliente: aplica su diccionario privado")
     r.set_defaults(func=cmd_render)
+
+    t = sub.add_parser("tighten", help="tramos sin silencios (JSON) para montar")
+    t.add_argument("transcript")
+    t.add_argument("--start", type=float)
+    t.add_argument("--end", type=float)
+    t.add_argument("--gap", type=float, default=0.35, help="silencio mínimo a quitar (s)")
+    t.add_argument("--pad", type=float, default=0.12, help="aire que se deja a cada lado (s)")
+    t.set_defaults(func=cmd_tighten)
+
+    d = sub.add_parser("dict", help="diccionario permanente de correcciones")
+    d.add_argument("accion", choices=["agregar", "ver"])
+    d.add_argument("mal", nargs="?")
+    d.add_argument("bien", nargs="?")
+    d.add_argument("--cliente", help="guardar en el diccionario privado del cliente")
+    d.set_defaults(func=cmd_dict)
 
     args = ap.parse_args()
     return args.func(args)

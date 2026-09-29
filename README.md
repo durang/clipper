@@ -113,6 +113,14 @@ El `.txt` se ve así:
 [   18.9 →    25.1]  Es decidir dónde vive tu aplicación.
 ```
 
+**Idioma:** por defecto `--lang auto`: detecta con 30 s de audio (desde el 10 % del video, para
+esquivar intros y música) y el modelo `tiny`. Si pasas `--lang es` **se verifica** contra el audio:
+si suena a otro idioma, se detiene (código 3) en vez de transcribir inglés como español — error real
+que costó 50 minutos. `--force-lang` salta la verificación. Si no puede detectar, falla; nunca asume.
+
+**Diccionario permanente:** antes de escribir la transcripción corrige los nombres que Whisper
+escribe como suenan (ver [Diccionario](#diccionario-permanente)).
+
 **Modelos:** `tiny` (rápido, tosco) · `base` (recomendado) · `small` (mejor,
 ~3x más lento) · `medium`. En una máquina de 2 CPU, `base` corre cerca de
 tiempo real.
@@ -167,9 +175,18 @@ Opciones:
 
 ```bash
 --horizontal              # conservar el encuadre original
---words-per-caption 2     # palabras por bloque (default 3)
+--fit crop --crop-x 0.4   # vertical por recorte 9:16 (sin fondo difuminado), centrado en x
+--tighten 0.35            # quita silencios > 0.35 s, nunca dentro de una palabra
+--cover-subs 0.2          # difumina el 20 % inferior del original (subtítulos quemados)
+--words-per-caption 2     # palabras por bloque (default 3; además, nunca más de lo que cabe)
+--no-highlight            # sin resaltar la palabra que se está diciendo
+--no-captions             # solo cortar: para montar después con /edit-video
+--cliente acme            # aplica también el diccionario privado de ese cliente
 --no-normalize            # no tocar el audio
 ```
+
+Todo lo de encuadre se puede fijar **por clip** en el JSON (`fit`, `crop_x`, `tighten`,
+`cover_subs`): el agente mira los frames de cada momento y decide dónde está la cara.
 
 ### El campo `hook`
 
@@ -196,9 +213,13 @@ Al renderizar, avisa si el clip excede el límite de cada red:
 
 ## Cómo reencuadra a vertical
 
-Un video horizontal metido a 9:16 deja franjas negras. `clipper` hace lo que
-usan los editores: duplica el video, difumina una copia como fondo y centra la
-otra encima.
+Dos modos:
+
+- **`--fit crop`** (el mejor cuando hay una persona): recorte 9:16 a pantalla completa, centrado en
+  `crop_x` (0 = izquierda, 1 = derecha). Sin franjas ni fondo borroso. Si el video cambia de plano y
+  la cara se mueve, se decide por clip.
+- **`--fit blur`** (default, seguro): duplica el video, difumina una copia como fondo y centra la
+  otra encima.
 
 ```
 [0:v]split=2[bg][fg];
@@ -217,6 +238,13 @@ Llena el cuadro sin recortar cabezas y sin barras negras.
 Whisper entrega tiempos **por palabra** (`--word_timestamps`). `clipper` los
 agrupa en bloques de 1–3 palabras que se suceden rápido — el estilo que domina
 en Reels, TikTok y Shorts, y el que mide mejor retención que el subtítulo largo.
+
+- **La palabra que se está diciendo se resalta** en amarillo (el color del gancho). Se desactiva con
+  `--no-highlight`.
+- **Cada bloque cabe en una línea**: además del número de palabras, se limita por caracteres según el
+  tamaño de letra. Un bloque como "Colombia, first nearshoring," se salía por los dos lados.
+- **Zona segura**: en vertical el subtítulo queda por encima del 20 % inferior (y < 1536 en 1920),
+  que Reels, TikTok y Shorts tapan con el texto del post y los botones.
 
 Se emiten como **ASS** (no SRT) para tener control real de tamaño, contorno y
 posición a 1080x1920. Blanco, negritas, contorno negro grueso, centrado abajo.
@@ -243,9 +271,8 @@ Se desactiva con `--no-normalize`.
 energía encuentran dónde alguien *habló fuerte*, no dónde *dijo algo que
 importa*. Producen clips promedio. El criterio se delega.
 
-**Por qué SRT y no ASS.** `force_style` sobre SRT cubre el 95% de los casos y se
-lee de un vistazo. Si necesitas karaoke o posiciones por palabra, el filtro
-`ass` ya está disponible en ffmpeg.
+**Por qué ASS y no SRT.** SRT con `force_style` no permite resaltar una palabra dentro del bloque
+ni fijar posición y contorno con precisión a 1080x1920. ASS sí, y libass lo quema igual.
 
 **Por qué `-ss` antes de `-i`.** Búsqueda rápida por keyframe: recorta antes de
 decodificar. En archivos de una hora es la diferencia entre segundos y minutos.
@@ -275,7 +302,59 @@ Probado de punta a punta en Amazon Linux 2023, 2 vCPU:
 - `drawtext` **no** está compilado en el ffmpeg probado; el gancho se resuelve
   con ASS, que sí funciona vía libass
 
+Y sobre una entrevista real de feria (inglés, subtítulos quemados, 2 vCPU):
+
+- Diccionario: "Columbia" → Colombia, "near Turing" → nearshoring (dos palabras fundidas en una con
+  sus tiempos), "EmoQs" → MOQs; "sol" no toca "girasol"; aplicarlo dos veces no cambia nada
+- Bloque "Colombia, first nearshoring," se salía del cuadro → ahora se parte para que quepa
+- Palabra activa en amarillo, subtítulo por encima de y = 1536, franja inferior del original difuminada
+- `--tighten`: audio y video salen con la misma duración (13.07 / 13.10 s) y los subtítulos siguen a la voz
+- 3 clips (40 s de salida) en vertical, preset veryfast: **69 s** de render en 2 vCPU
+
 ---
+
+## Diccionario permanente
+
+Whisper escribe los nombres como suenan. Una vez corregido, un nombre no se vuelve a corregir:
+
+```bash
+python3 clipper.py dict agregar "Columbia" "Colombia"
+python3 clipper.py dict agregar "Acme Corp" "ACME" --cliente acme     # privado de ese cliente
+python3 clipper.py dict ver
+```
+
+Se aplica en `analyze` (la transcripción ya sale bien) y otra vez en `render` (vale lo que agregaste
+después). Reglas: **palabra completa** ("sol" no toca "girasol"), sin mayúsculas, y las correcciones
+de **varias palabras** ("near Turing" → "nearshoring") funden los tiempos por palabra, para que el
+subtítulo palabra por palabra también salga bien.
+
+Capas, la última gana:
+
+| Capa | Archivo |
+|---|---|
+| Studio / global | `~/clipper-studio/dictionary.json` (o `CLIPPER_DICT`) |
+| Compartido con `/edit-video` | `~/.config/edit-video/diccionario.json` |
+| Cliente (privado) | `<área de clientes>/clients/<slug>/diccionario.json` |
+| Proyecto | `diccionario.json` junto al video |
+
+## Silencios fuera
+
+```bash
+python3 clipper.py render t.json clips.json --tighten 0.35          # en el render
+python3 clipper.py tighten t.json --start 12.4 --end 31 > keep.json  # solo los tramos (JSON)
+```
+
+Corta solo **entre** palabras, deja 0.12 s de aire a cada lado, y recalcula los subtítulos al nuevo
+tiempo. `tighten` imprime los tramos a conservar: es lo que usa `/edit-video` para su rough cut.
+Ojo: necesita tiempos por palabra con huecos reales (Whisper de OpenAI los da; whisper.cpp tiende a
+pegar el final de una palabra con el inicio de la siguiente).
+
+## Con /edit-video
+
+`clipper` es el **volumen**; [`/edit-video`](https://github.com/durang/edit-video) es el **nivel
+estudio** (motion design sobre HyperFrames). Lo que más rinde: clipper saca todos los clips rápidos y
+los 1–3 mejores se cortan con `--no-captions` y se montan en `/edit-video`. Comparten diccionario y
+área de clientes.
 
 ## Caché de transcripción
 
@@ -290,8 +369,9 @@ whisper — que en CPU es la parte lenta. Con `--force` la rehace.
 | **Corte por escena** | `ffmpeg` detecta cambios de escena; alinear los cortes ahí evita empezar a media palabra visual. | medio |
 | **Modo lote** | Una carpeta de grabaciones → analizar todas de un tirón. | bajo |
 | **Exportar miniaturas** | Frame representativo por clip, listo para portada. | bajo |
-| **Marca de agua / logo** | Overlay de marca en una esquina. | bajo |
+| **Recorte por cara automático** | Detectar la cara en los frames y fijar `crop_x` solo. Hoy lo decide el agente mirando los frames. | medio |
 | **Recorte por hablante activo** | Con dos personas en cuadro, seguir a quien habla. | alto |
+| **Silencios por energía** | Complementar `--tighten` con `silencedetect` cuando los tiempos por palabra vienen pegados. | bajo |
 
 ---
 
@@ -304,7 +384,8 @@ whisper — que en CPU es la parte lenta. Con `--force` la rehace.
   Para material que se publica, revisa el `.txt` antes de renderizar.
 - El desenfoque de fondo agrega costo de CPU. Con muchos clips, considera
   `--horizontal` y reencuadrar después.
-- Sin detección de escena ni de hablante.
+- Sin detección de escena ni de hablante. `--fit crop` usa un solo `crop_x` por clip: si el clip
+  cambia de plano y la cara se mueve mucho, usa `--fit blur` o parte el clip.
 
 ---
 

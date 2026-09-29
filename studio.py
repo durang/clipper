@@ -15,6 +15,9 @@ PYTHON = os.environ.get("STUDIO_PYTHON", "python3")
 WHISPER = Path(os.environ.get("WHISPER_BIN", str(Path.home() / ".local/bin/whisper")))
 MAX_BYTES = int(os.environ.get("STUDIO_MAX_BYTES", str(4 * 1024**3)))
 JOBS = ROOT / "jobs"; DICT_FILE = ROOT / "dictionary.json"
+# clipper.py aplica el diccionario (con límite de palabra y correcciones de varias palabras
+# también en los tiempos por palabra); le decimos cuál es el de Studio.
+os.environ.setdefault("CLIPPER_DICT", str(DICT_FILE))
 JOBS.mkdir(parents=True, exist_ok=True)
 LOCK = threading.Lock(); RUNNING: dict = {}
 PAGE_FILE = Path(__file__).with_name("clipper-studio.html")
@@ -62,46 +65,21 @@ def run(cmd, job, cwd=None):
         if line: log(job, "   " + line[:200])
     p.wait(); return p.returncode
 
-def detect_language(video, job):
-    log(job, "detectando idioma (30 s, modelo tiny)...")
-    wav = video.with_suffix(".detect.wav")
-    subprocess.run(["ffmpeg","-y","-v","error","-t","30","-i",str(video),
-                    "-ar","16000","-ac","1",str(wav)], check=False)
-    if not wav.exists(): return "Spanish"
-    out = subprocess.run([str(WHISPER),str(wav),"--model","tiny","--output_format","txt",
-                          "--output_dir",str(wav.parent),"--fp16","False"],
-                         capture_output=True, text=True)
-    wav.unlink(missing_ok=True)
-    m = re.search(r"Detected language:\s*([A-Za-z]+)", out.stdout + out.stderr)
-    lang = m.group(1).capitalize() if m else "Spanish"
-    log(job, f"idioma detectado: {lang}"); return lang
-
 def do_analyze(jid, lang, model):
     job = read_job(jid)
     if not job: return
     try:
         job["status"]="analizando"; job["step"]="transcribir"; write_job(job)
         d = job_dir(jid); video = d / job["video"]
-        if lang == "auto": lang = detect_language(video, job)
-        job["lang"] = lang; write_job(job)
+        # "auto" lo resuelve clipper: detecta con tiny y, si no puede, falla — nunca asume español.
         rc = run([PYTHON, CLIPPER, "analyze", video.name, "--model", model,
-                  "--lang", lang, "--force"], job, cwd=d)
+                  "--lang", lang or "auto", "--force"], job, cwd=d)
         cands = list(d.glob("*.transcript.json"))
         if rc != 0 or not cands:
             job["status"]="error"; log(job, f"analyze fallo (rc={rc})")
         else:
             tj = cands[0]; data = json.loads(tj.read_text("utf-8"))
-            fixes = load_dict(); n = 0
-            for seg in data.get("segments", []):
-                for bad, good in fixes.items():
-                    if bad.lower() in seg["text"].lower():
-                        seg["text"] = re.sub(re.escape(bad), good, seg["text"], flags=re.I); n += 1
-                    for w in seg.get("words", []):
-                        if bad.lower() in w.get("w","").lower():
-                            w["w"] = re.sub(re.escape(bad), good, w["w"], flags=re.I)
-            if n:
-                tj.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-                log(job, f"diccionario aplico {n} correcciones")
+            job["lang"] = data.get("language", lang)
             job["transcript"]=tj.name; job["status"]="transcrito"; job["step"]="revisar"
             log(job, f"listo: {len(data.get('segments',[]))} segmentos")
         write_job(job)
